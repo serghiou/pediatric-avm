@@ -1,0 +1,12 @@
+# Directories
+data
+outputs
+publication
+
+# R files
+.Rhistory
+.Rproj.user
+
+# Mac files
+*.DS_Store
+

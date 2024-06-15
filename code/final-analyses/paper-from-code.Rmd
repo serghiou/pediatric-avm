@@ -1,0 +1,414 @@
+---
+title: 'Paper from code'
+author: "Stylianos Serghiou"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+params:
+  PROPORTION_OF_DATA: 0.5
+output:
+  prettydoc::html_pretty:
+    theme: hpstr      # or: architect; https://github.com/yixuan/prettydoc
+    highlight: github # or: vignette
+    toc: TRUE         # no toc_float available
+    df_print: kable   # obviates %>% kable; does not replace styling though
+---
+
+<style>
+p {
+
+text-align: justify;
+text-justify: interword;
+padding: 0 0 0.5em 0
+
+}
+</style>
+
+```{r knitr, echo=FALSE}
+# Load packages
+library(knitr)
+library(rmdformats)
+library(kableExtra)
+library(ggplot2)
+
+
+######### knitr
+
+# Define chunk options
+opts_chunk$set(
+  echo = TRUE,
+  cache = FALSE, # if TRUE, no need to rerun chunks
+  # cache.lazy = TRUE,  # use with big objects (>1 GB)
+  cache.comments = FALSE, # do not rebuild if comments change
+  tidy = FALSE, # can play with this
+  warning = FALSE,
+  message = FALSE,
+  comment = NA,
+  fig.align = "center",
+  fig.width = 7,
+  fig.path = "Figs/", # export all figures to dir Figs
+  linewidth = 91,
+  width = 75
+)
+
+# Initialize hook
+hook_output <- knit_hooks$get("output")
+
+# Hook to wrap output text when it exceeds 'n' using linewidth
+knit_hooks$set(output = function(x, options) {
+  if (!is.null(n = options$linewidth)) {
+    x <- knitr:::split_lines(x)
+
+    # wrap lines wider than 'n'
+    if (any(nchar(x) > n)) {
+      x <- strwrap(x, width = n)
+    }
+    x <- paste(x, collapse = "\n")
+  }
+  hook_output(x, options)
+})
+
+# Times a chunk and prints the time it took to run it under the chunk
+# To time a chunk, include in the chunk options: {r my_chunk, timeit=TRUE}
+knitr::knit_hooks$set(timeit = local({
+  now <- NULL
+  function(before, options) {
+    if (before) {
+      now <<- Sys.time()
+    } else {
+      res <- difftime(Sys.time(), now)
+      now <<- NULL
+      # use options$label if you want the chunk label as well
+      paste("Time for this code chunk:", as.character(res))
+    }
+  }
+}))
+
+
+######### kableExtra
+
+options(
+  knitr.kable.NA = "", # replace NAs in tables with blank
+  digits = 3 # round digits (doesn't work without this here!)
+)
+
+# Function to simplify table styling
+sable <- function(tab, escape = TRUE, full_width = FALSE, drop = FALSE,
+                  font_size = 12) {
+  if (drop) {
+    tab |>
+      kable(escape = escape, booktabs = TRUE) |>
+      kableExtra::collapse_rows(valign = "top") |>
+      kableExtra::kable_styling(
+        "striped",
+        position = "center",
+        full_width = full_width,
+        font_size = font_size
+      )
+  } else {
+    tab |>
+      kable(escape = escape, booktabs = TRUE) |>
+      kableExtra::kable_styling(
+        "striped",
+        position = "center",
+        full_width = full_width,
+        font_size = font_size
+      )
+  }
+}
+
+
+#########  ggplot2
+
+# Set up preferred theme in ggplot2
+my_theme <-
+  # this and theme_minimal() are my favorite
+  theme_light() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.title = element_text(face = "bold"),
+    axis.title.x = element_text(margin = margin(t = 15)),
+    axis.title.y = element_text(margin = margin(r = 7)),
+    legend.key = element_rect(colour = NA, fill = NA), # Avoid borders
+    panel.border = element_blank(),
+    text = element_text(color = "grey20"),
+    title = element_text(face = "bold")
+  )
+
+# Make the above theme the default theme
+original_theme <- theme_set(my_theme)
+```
+
+# Setup
+
+## Imports
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(magrittr)
+library(readr)
+library(tidyr)
+```
+
+## Configurations
+
+Locations.
+
+```{r}
+# Source locations
+src_dirname <- "../../data/tidy/exp=membrane-permeabilization/"
+src_basename <- "2023-03-11.csv"
+
+# Destination locations
+dst_dirname <- "../../outputs/final/paper-from-code/"
+```
+
+Configurations.
+
+```{r}
+# Should the dockerfile be updated automatically?
+UPDATE_DOCKERFILE <- FALSE # nolint⁠
+```
+
+
+## Outputs
+
+```{r}
+figures <- list()
+tables <- list()
+```
+
+
+
+------------------------------------------------------------------------
+
+# Read
+
+```{r}
+# Read all csv files
+membrane_ <- read_csv(file.path(src_dirname, src_basename))
+```
+
+
+------------------------------------------------------------------------
+
+# Conform
+
+Create file.
+
+```{r}
+membrane <- membrane_
+```
+
+
+------------------------------------------------------------------------
+
+# Text
+
+Compute difference between channels.
+
+```{r}
+# Create channel columns and difference
+wide <-
+  membrane %>%
+  pivot_wider(
+    id_cols = condition,
+    names_from = channel,
+    names_glue = "channel_{channel}",
+    values_from = mean_intensity
+  ) %>%
+  mutate(diffs = channel_1 - channel_2)
+
+# Compute mean in differences
+mean_diff <- wide %>%
+  pull(diffs) %>%
+  mean()
+
+# Print mean
+sprintf("Mean intensity difference in Channel 1 vs. 2 = %.1f units", mean_diff)
+```
+
+
+------------------------------------------------------------------------
+
+# Figures
+
+## Figure 1
+
+### Panel a
+
+```{r}
+# Plot
+figures$membrane_histogram <-
+  membrane %>%
+  mutate(channel = paste("Channel", channel)) %>%
+  ggplot(aes(x = mean_intensity, fill = channel, color = channel)) +
+  geom_histogram(alpha = 0.7) +
+  facet_wrap(vars(condition)) +
+  labs(x = "Mean intensity (units)", y = "Counts") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(vjust = -1),
+    axis.title.y = element_text(vjust = 3),
+    legend.title = element_blank()
+  )
+
+# Print
+figures$membrane_histogram
+```
+
+### Panel b
+
+I am choosing an image on the following criteria:
+
+1. xxx
+2. xxx
+3. ...
+
+On the basis of this criteria, I will be illustrating the following image:
+
+```{r}
+# Choose image
+from_experiment <- "../../data/conformed/exp=membrane-permeabilization/"
+from_condition <- "detergent=digitonin_conc=0.02mmolar_minutes=1/"
+from_basename <- "date=2022-03-19_488=poc5_594=cnb_01_01.tif"
+
+# Copy paste to output directory
+from <- file.path(from_experiment, from_condition, from_basename)
+to <- file.path(dst_dirname, "figure_1b.tif")
+file.copy(from, to)
+```
+
+
+------------------------------------------------------------------------
+
+# Tables
+
+```{r}
+```
+
+
+------------------------------------------------------------------------
+
+# Write
+
+## Setup
+
+Create the necessary directories.
+
+```{r}
+# Get today's date
+today <- Sys.Date()
+today <- format(today, "%Y-%m-%d")
+
+# Create folder names
+base_folder <- file.path(dst_dirname)
+date_folder <- file.path(dst_dirname, today)
+csv_folder <- file.path(date_folder, "csv")
+pdf_folder <- file.path(date_folder, "pdf")
+html_folder <- file.path(date_folder, "html")
+
+# Create folders
+dir.create(base_folder)
+dir.create(date_folder)
+dir.create(csv_folder)
+dir.create(pdf_folder)
+dir.create(html_folder)
+
+# Print folder names
+print(base_folder)
+print(date_folder)
+print(csv_folder)
+print(pdf_folder)
+print(html_folder)
+```
+
+
+## Figures
+
+Write all figures.
+
+```{r}
+# Save
+ggsave(
+  file.path(dst_dirname, "paper-from-code_fig_1a.pdf"),
+  figures$membrane_histogram,
+  height = 4,
+  width = 6
+)
+```
+
+
+## Tables
+
+Write all tables.
+
+```{r}
+```
+
+
+------------------------------------------------------------------------
+
+# Reproducibility
+
+## Linting and styling
+
+```{r}
+# Style current file
+styler::style_file(
+  path = rstudioapi::getSourceEditorContext()$path,
+  style = styler::tidyverse_style
+)
+
+# Lint current file
+lintr::lint(rstudioapi::getSourceEditorContext()$path)
+```
+
+
+## Dependency management
+
+```{r}
+# Clean up project of libraries not in use
+# (use prompt = FALSE to avoid the interactive session)
+# (packages can only be removed in interactive mode b/c this is destructive)
+renv::clean(prompt = TRUE)
+
+# Update lock file with new packages
+renv::snapshot()
+```
+
+
+## Containerization
+
+```{r}
+# Only run this if option is set to TRUE
+if (UPDATE_DOCKERFILE) {
+  # Create a dockerfile from the session info
+  my_dockerfile <- containerit::dockerfile(from = sessionInfo(), env = ls())
+  # Write file
+  write(my_dockerfile, file = "~/Dockerfile")
+  # Print
+  print(my_dockerfile)
+}
+```
+
+
+------------------------------------------------------------------------
+
+# Documentation
+
+
+## Session info
+
+```{r}
+print(sessionInfo(), locale = FALSE)
+```
+
+## References
+
+```{r}
+(.packages()) %>%
+  sort() %>%
+  lapply(citation) %>%
+  lapply(c) %>%
+  unique()
+```
