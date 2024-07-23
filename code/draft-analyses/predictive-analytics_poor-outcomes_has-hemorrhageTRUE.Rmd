@@ -1,0 +1,3408 @@
+---
+title: 'Predictive analytics: Poor outcomes - Hemorrhage'
+author: "Stylianos Serghiou"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+params:
+  PROPORTION_OF_DATA: 1
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    df_print: kable    # obviates %>% kable; does not replace styling though
+    code_folding: hide # or: show; (comment out to not give option)
+  pdf_document:
+    highlight: tango
+    df_print: kable
+    latex_engine: pdflatex
+    keep_tex: yes
+  tufte::tufte_handout: default
+  tufte::tufte_html: 
+    toc: TRUE
+  prettydoc::html_pretty:
+    # no cold_folding available
+    theme: hpstr      # or: architect; https://github.com/yixuan/prettydoc
+    highlight: github # or: vignette
+    toc: TRUE         # no toc_float available
+    df_print: kable   # obviates %>% kable; does not replace styling though
+  html_document:
+    highlight: tango
+    theme: sandstone
+    df_print: kable
+    toc: yes
+    toc_depth: 2
+    toc_float: yes
+    css: "path_to_custom.css"
+header-includes:
+- \DeclareUnicodeCharacter{3B8}{~}
+- \DeclareUnicodeCharacter{3B1}{~}
+- \DeclareUnicodeCharacter{3B2}{~}
+- \DeclareUnicodeCharacter{223C}{~}
+- \DeclareUnicodeCharacter{2264}{~}
+- \DeclareUnicodeCharacter{2265}{~}
+- \DeclareUnicodeCharacter{2581}{~}
+- \DeclareUnicodeCharacter{2582}{~}
+- \DeclareUnicodeCharacter{2583}{~}
+- \DeclareUnicodeCharacter{2585}{~}
+- \DeclareUnicodeCharacter{2586}{~}
+- \DeclareUnicodeCharacter{2587}{~}
+- \DeclareUnicodeCharacter{FB00}{~}
+- \usepackage{graphicx}
+editor_options: 
+  chunk_output_type: inline
+---
+
+<style>
+p {
+
+text-align: justify;
+text-justify: interword;
+padding: 0 0 0.5em 0
+
+}
+</style>
+
+```{r knitr, echo=FALSE}
+# Load packages
+library(knitr)
+library(rmdformats)
+library(kableExtra)
+library(ggplot2)
+library(magrittr)
+
+
+######### knitr
+
+# Define chunk options
+opts_chunk$set(
+  echo = T,
+  cache = F, # if TRUE, no need to rerun chunks
+  # cache.lazy = TRUE,  # use with big objects (>1 GB)
+  cache.comments = F, # do not rebuild if comments change
+  tidy = F, # can play with this
+  warning = F,
+  message = F,
+  comment = NA,
+  fig.align = "center",
+  fig.width = 7,
+  fig.path = "Figs/", # export all figures to dir Figs
+  linewidth = 91,
+  width = 75
+)
+
+# Initiatialize hook
+hook_output <- knit_hooks$get("output")
+
+# Hook to wrap output text when it exceeds 'n' using linewidth
+knit_hooks$set(output = function(x, options) {
+  if (!is.null(n <- options$linewidth)) {
+    x <- knitr:::split_lines(x)
+
+    # wrap lines wider than 'n'
+    if (any(nchar(x) > n)) {
+      x <- strwrap(x, width = n)
+    }
+    x <- paste(x, collapse = "\n")
+  }
+  hook_output(x, options)
+})
+
+# Times a chunk and prints the time it took to run it under the chunk
+# To time a chunk, include in the chunk options: {r my_chunk, timeit=TRUE}
+knitr::knit_hooks$set(timeit = local({
+  now <- NULL
+  function(before, options) {
+    if (before) {
+      now <<- Sys.time()
+    } else {
+      res <- difftime(Sys.time(), now)
+      now <<- NULL
+      # use options$label if you want the chunk label as well
+      paste("Time for this code chunk:", as.character(res))
+    }
+  }
+}))
+
+# For more knitr options visit: https://yihui.name/knitr/options/
+# and his github page: https://github.com/yihui/knitr-examples
+
+
+######### kableExtra
+
+options(
+  knitr.kable.NA = "", # replace NAs in tables with blank
+  digits = 3 # round digits (doesn't work without this here!)
+)
+
+## Example use
+# data.frame(x = c(1,2,3), y = c(4,5,6), z = c(7,8,9)) %>%
+#   kable(booktabs = T) %>% kable_styling()
+
+# Function to simplify table styling
+sable <- function(tab, escape = T, full_width = F, drop = F, font_size = 12) {
+  if (drop) {
+    tab %>%
+      kable(escape = escape, booktabs = T) %>%
+      collapse_rows(valign = "top") %>%
+      kable_styling(
+        "striped",
+        position = "center",
+        full_width = full_width,
+        font_size = font_size
+      )
+  } else {
+    tab %>%
+      kable(escape = escape, booktabs = T) %>%
+      kable_styling(
+        "striped",
+        position = "center",
+        full_width = full_width,
+        font_size = font_size
+      )
+  }
+}
+
+## Guidelines
+# No longer need to define options(knitr.table.format = "html"). It is now automatically done as soon as you load kableExtra
+# No need to run kable() every time - done automatically as soon as you load kableExtra
+# Loading kableExtra nullifies any styling applied by df_table: kable in the preamble - if you are content with standard formatting, DO NOT load kableExtra
+
+
+#########  ggplot2
+
+# Set up preferred theme in ggplot2
+my_theme <-
+  # this and theme_minimal() are my favorite
+  theme_light() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.title = element_text(face = "bold"),
+    axis.title.x = element_text(margin = margin(t = 15)),
+    axis.title.y = element_text(margin = margin(r = 7)),
+    legend.key = element_rect(colour = NA, fill = NA), # Avoid borders
+    panel.border = element_blank(),
+    text = element_text(color = "grey20"),
+    title = element_text(face = "bold")
+  )
+
+# Make the above theme the default theme
+original_theme <- theme_set(my_theme)
+
+# Use ggplot2::ggsave to save plots after plotting - this reduces size dramatically
+
+
+######### Tabbed sections
+
+# You can organize content using tabs by applying the .tabset class attribute to headers within a document. This will cause all sub-headers of the header with the .tabset attribute to appear within tabs rather than as standalone sections. For example:
+
+## Quarterly Results {.tabset}
+
+### By Product
+
+
+######### Update package
+
+# To update the package use:
+# devtools::install_github(serghiou/serghioutemplates)
+```
+
+
+# Thoughts
+
+## Questions
+
+- What deficit are we talking about? Is it covered by the mRS?
+- Should the pre-treatment mRS be in the model? Already covered by the others?
+
+
+## Backlog
+
+- Honest estimation
+- G estimation (using only significant ones to get accurate ORs)
+- Make sure that the number of outcomes (26) is valid.
+- Bootstrap the whole process - how many models include each of the features?
+- The SuSiE method: https://www.biorxiv.org/content/10.1101/501114v1
+- Choose best model with forward/backward exclusion
+- Feature selection with honest estimation + p-value-based + bootstrap
+- Feature selection with honest estimation + LASSO-based + bootstrap
+- Implement PCA to create independent variables and not drop variables
+- Bayesian fitting
+- Change to use tidybayes and tidymodels
+- Use neural networks to fit
+- Consider a time-to-event analysis
+
+
+------------------------------------------------------------------------
+
+# Setup
+
+## Imports
+
+```{r setup}
+# Load packages
+library(glmnet)
+library(magrittr)
+library(selectiveInference)
+library(tidyverse)
+
+# Data
+# https://office365stanford-my.sharepoint.com/:x:/r/personal/simonlev_stanford_edu/_layouts/15/Doc.aspx?sourcedoc=%7BCE7DAF19-8F1A-43B0-866D-3D0F36336EDC%7D&file=Peds%20AVM%20Database%20July%2010%202024%20Onwards.xlsx&fromShare=true&action=default&mobileredirect=true
+
+# Source code
+```
+
+
+## Configurations
+
+```{r}
+# Source locations
+SRC_DIRNAME <- "../../data/3_tidy/patients"
+SRC_BASENAME <- "patients-daily_2024-07-21.csv"
+
+# Destination locations
+DST_DIRNAME <- paste0("../../outputs/")
+
+# Analysis name
+ANALYSIS_NAME <- "predictive-analytics/poor-outcomes_has-hemorrhageFALSE"
+
+# Outcome of choice
+CHOSEN_OUTCOME <- "is_poor_outcome"
+CHOSEN_OUTCOME_LEVELS <- c(FALSE, TRUE)
+CHOSEN_OUTCOME_LABELS <- c("Good outcome", "Poor outcome")
+
+# Should the Dockerfile be automatically updated?
+UPDATE_DOCKERFILE <- FALSE
+
+# Set the seed
+set.seed(1891)
+```
+
+
+## Parameters
+
+```{r}
+EXPOSURES_CONTINUOUS <- c(
+  "Age at 1st treatment (years)" = "age_at_first_treatment_yrs",
+  "mRS (presentation)" = "modified_rankin_score_presentation",
+  "mRS (pre-treatment)" = "modified_rankin_score_pretreatment",
+  "mRS (1-week post-op)" = "modified_rankin_score_postop_within_1_week",
+  "mRS (final)" = "modified_rankin_score_final",
+  "Nidus size (cm)" = "max_size_cm",
+  "Spetzler-Martin grade" = "spetzler_martin_grade",
+  "Lawton-Young grade" = "lawton_young_grade",
+  "Size score" = "size_score"
+)
+
+EXPOSURES_BINARY <- c(
+  "Sex (Male)" = "is_male",
+  "Involves eloquent location" = "is_eloquent_location",
+  "Has deep venous drainage" = "has_deep_venous_drainage",
+  "Diffuse nidus" = "is_diffuse_nidus",
+  "Hemorrhage at presentation" = "has_hemorrhage",
+  "Seizures at presentation" = "has_seizures",
+  "Deficit at presentation" = "has_deficit",
+  "Paresis at presentation" = "has_paresis",
+  "Presence of aneurysms" = "has_associated_aneurysm"
+)
+
+EXPOSURES_CATEGORICAL <- c(
+  "Location" = "location",
+  "Venous drainage" = "venous_drainage",
+  "Modality of treatment" = "procedure_combinations"
+)
+
+OUTCOMES <- c(
+  "Poor outcome (mRS >= 3)" = "is_poor_outcome",
+  "Obliteration" = "is_obliterated",
+  "Complications - minor" = "has_complication_minor",
+  "Complications - major" = "has_complication_major",
+  "mRS change (final - pre-treatment)" =
+    "modified_rankin_score_final_minus_pretx",
+  "mRS change (final - presentation)" =
+    "modified_rankin_score_final_minus_presentation",
+  "mRS change direction (Final - Pre-tx)" = "change_in_mrs_tx_vs_final"
+)
+```
+
+
+## Outputs
+
+Create lists.
+
+```{r}
+plots <- list()
+tables <- list()
+models <- list()
+```
+
+
+## Functions
+
+R utils.
+
+```{r}
+```
+
+
+Data analysis utils.
+
+```{r}
+```
+
+
+------------------------------------------------------------------------
+
+# Read
+
+```{r}
+# File path
+filepath <- file.path(SRC_DIRNAME, SRC_BASENAME)
+
+# Read
+patients_ <-
+  read_csv(filepath) %>%
+  dplyr::sample_frac(params$PROPORTION_OF_DATA) %>% 
+  filter(has_hemorrhage)
+```
+
+
+------------------------------------------------------------------------
+
+# Conform
+
+## Setup
+
+Remove all empty rows.
+
+```{r}
+patients_ <-
+  patients_ %>%
+  filter(!is.na(patient_id)) %>%
+  arrange(patient_id)
+```
+
+
+Create two dataframes - one for univariable and one for multivariable analysis. This is because variables for multivariable analysis will be recoded to reduce the number of levels to avoid overfitting the model.
+
+```{r}
+df_uni <-
+  patients_ %>%
+  filter(is_eligible)
+
+df_multi <-
+  patients_ %>%
+  filter(is_eligible)
+```
+
+
+## Recode columns
+
+For `venous_drainage` if "Both", mark as "Deep."
+
+```{r}
+df_multi <-
+  df_multi %>%
+  mutate(
+    venous_drainage = ifelse(venous_drainage == "Both", "Deep", venous_drainage)
+  )
+```
+
+
+For `procedure_combinations`, change > 1 to multimodal to reduce levels.
+
+```{r}
+df_multi <-
+  df_multi %>%
+  mutate(procedure_combinations = case_when(
+    nchar(procedure_combinations) > 1 ~ "Multimodal",
+    .default = procedure_combinations
+  ))
+```
+
+
+For `location`, reduce choices (use "Other").
+
+```{r}
+df_multi <-
+  df_multi %>%
+  mutate(
+    location = ifelse(location == "Corpus Callosum", "Other", location),
+    location = ifelse(location == "Cerebellum", "Other", location),
+    # location = ifelse(location == "Deep", "Other", location),
+    location = factor(location),
+    location = relevel(location, ref = "Other")
+  )
+```
+
+
+## Missingness
+
+```{r}
+# Get cols
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL,
+  OUTCOMES
+))
+
+# Count missingness
+df_multi %>%
+  select(cols) %>%
+  summarise_all(~ sum(is.na(.))) %>%
+  pivot_longer(everything(), values_to = "num_missing") %>%
+  arrange(desc(num_missing)) %>%
+  filter(num_missing > 0) %>%
+  sable()
+```
+
+
+Which eligible patients are missing each variable?
+
+```{r}
+df_multi %>%
+  filter(is_eligible) %>%
+  select(mrn, cols) %>%
+  mutate(across(-mrn, is.na)) %>%
+  pivot_longer(
+    cols = -mrn,
+    names_to = "name",
+    values_to = "is_missing"
+  ) %>%
+  filter(is_missing) %>%
+  group_by(name) %>%
+  summarize(mrn = str_c(mrn, collapse = ", ")) %>%
+  sable()
+```
+
+
+------------------------------------------------------------------------
+
+# Compute - Visualizations
+
+## Overall
+
+Distribution of values of the exposures across levels of the outcome.
+
+```{r, fig.width=12, fig.height=8}
+# Define the predictors of interest
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  CHOSEN_OUTCOME
+)
+
+# Reshape the data
+df_long <-
+  df_uni %>%
+  select(all_of(cols)) %>%
+  pivot_longer(-CHOSEN_OUTCOME, names_to = "predictor", values_to = "value")
+
+# Plot the box plots
+df_long %>%
+  ggplot(aes_string(
+    x = CHOSEN_OUTCOME,
+    y = "value",
+    fill = CHOSEN_OUTCOME,
+    color = CHOSEN_OUTCOME
+  )) +
+  geom_boxplot(alpha = 0.5) +
+  facet_wrap(~predictor, scales = "free") +
+  labs(x = "Outcome", y = "Value", fill = "Outcome") +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11),
+    strip.text = element_text(size = 11),
+    legend.position = "none"
+  )
+```
+
+
+## By hemorrhage
+
+```{r, fig.width=14, fig.height=12}
+# Define the predictors of interest
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  CHOSEN_OUTCOME
+)
+
+# Reshape the data
+df_long <-
+  df_uni %>%
+  select(all_of(cols)) %>%
+  pivot_longer(
+    cols = -c(CHOSEN_OUTCOME, `Hemorrhage at presentation`),
+    names_to = "predictor",
+    values_to = "value"
+  )
+
+# Plot the box plots
+df_long %>%
+  ggplot(aes_string(
+    x = CHOSEN_OUTCOME,
+    y = "value",
+    fill = "`Hemorrhage at presentation`",
+    color = "`Hemorrhage at presentation`"
+  )) +
+  geom_boxplot(alpha = 0.5) +
+  facet_wrap(~predictor, scales = "free") +
+  labs(x = "Outcome", y = "Value", fill = "Outcome") +
+  theme_minimal() +
+  guides(fill = "none") +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11),
+    strip.text = element_text(size = 11)
+  )
+```
+
+
+------------------------------------------------------------------------
+
+# Compute - Descriptive statistics
+
+## Using table1
+
+```{r}
+library(table1)
+
+table1::table1(
+  ~ factor(is_male) + age_at_first_treatment_yrs + factor(is_eloquent_location) + max_size_cm | has_hemorrhage,
+  data = df_uni
+)
+```
+
+```{r}
+# Initialize values
+df <- df_uni
+
+# Remove missing values in stratification variables
+df <-
+  df %>%
+  drop_na(has_hemorrhage, CHOSEN_OUTCOME)
+
+# Define columns
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  OUTCOMES[OUTCOMES == CHOSEN_OUTCOME]
+)
+
+# Assign labels to the variables in the dataframe
+for (var in cols) {
+  label(df[[var]]) <- names(cols[cols == var])
+}
+
+# Assign meaningful labels to the has_hemorrhage variable
+df$has_hemorrhage <- factor(
+  df$has_hemorrhage,
+  levels = c(FALSE, TRUE),
+  labels = c("No Hemorrhage", "Has Hemorrhage")
+)
+
+df[, CHOSEN_OUTCOME] <- factor(
+  df %>% pull(CHOSEN_OUTCOME),
+  levels = CHOSEN_OUTCOME_LEVELS,
+  labels = CHOSEN_OUTCOME_LABELS
+)
+
+# Define custom rendering functions if needed
+render_continuous <- function(x) {
+  with(stats.apply.rounding(stats.default(x), digits = 2), c(
+    "Mean (SD)" = sprintf("%s (&plusmn; %s)", MEAN, SD),
+    "Median (IQR)" = sprintf("%s (%s - %s)", MEDIAN, Q1, Q3)
+  ))
+}
+
+compute_pvalues <- function(x, ...) {
+  # Construct vectors of data y, and groups (strata) g
+  y <- unlist(x)
+  g <- factor(rep(1:length(x), times = sapply(x, length)))
+  if (is.numeric(y)) {
+    # For numeric variables, perform a standard 2-sample t-test
+    p <- t.test(y ~ g)$p.value
+  } else {
+    # For categorical variables, perform a chi-squared test of independence
+    p <- chisq.test(table(y, g))$p.value
+  }
+  # Format the p-value, using an HTML entity for the less-than sign.
+  # The initial empty string places the output on the line below the variable label.
+  c("", sub("<", "&lt;", format.pval(p, digits = 3, eps = 0.001)))
+}
+
+# Create the descriptive table
+frla <- as.formula(paste("~ . | has_hemorrhage *", CHOSEN_OUTCOME))
+a <- table1(frla,
+  data = df[, unname(cols)],
+  render.continuous = render_continuous,
+  overall = c(left = "Overall"),
+  topclass = "Rtable1-zebra"
+)
+```
+
+
+## Overall
+
+Continuous.
+
+```{r}
+# Define arguments
+df <- df_uni
+cols <- c(EXPOSURES_CONTINUOUS)
+
+# Apply desired formatting to numbers
+format_numbers <- function(x) {
+  sprintf("%.1f", x)
+}
+
+# Compute new dataset
+df <-
+  df %>%
+  select(all_of(cols), CHOSEN_OUTCOME, has_hemorrhage) %>%
+  drop_na(CHOSEN_OUTCOME, has_hemorrhage)
+
+# Compute descriptive statistics
+desc_stats <-
+  df %>%
+  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
+  summarize(
+    num_total = n(),
+    num_missing = sum(is.na(values)),
+    mean = mean(values, na.rm = TRUE),
+    sd = sd(values, na.rm = TRUE),
+    min = quantile(values, 0, na.rm = TRUE),
+    max = quantile(values, 1, na.rm = TRUE),
+    q_50 = quantile(values, 0.50, na.rm = TRUE),
+    q_25 = quantile(values, 0.25, na.rm = TRUE),
+    q_75 = quantile(values, 0.75, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    stats = glue::glue("{format_numbers(mean)} ({format_numbers(sd)})"),
+    !!sym(CHOSEN_OUTCOME) := factor(
+      !!sym(CHOSEN_OUTCOME),
+      levels = CHOSEN_OUTCOME_LEVELS,
+      labels = CHOSEN_OUTCOME_LABELS
+    )
+  ) %>%
+  pivot_wider(
+    id_cols = keys,
+    names_from = CHOSEN_OUTCOME,
+    values_from = stats
+  ) %>%
+  relocate(CHOSEN_OUTCOME_LABELS[1], .after = CHOSEN_OUTCOME_LABELS[2])
+
+# Compute p-values
+pvals <-
+  df %>%
+  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+  group_by(keys) %>%
+  summarize(
+    pvalue = wilcox.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
+  )
+
+# Synthesize
+out <-
+  desc_stats %>%
+  left_join(pvals)
+
+# Prettify
+num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
+num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
+
+new_col_names <- c(
+  glue::glue("All - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
+  glue::glue("All - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
+  glue::glue("All - P-value")
+)
+
+out <-
+  out %>%
+  rename_with(.cols = !!sym(CHOSEN_OUTCOME_LABELS[2]):pvalue, ~new_col_names)
+
+# Print
+out_all_continuous <- out
+sable(out_all_continuous)
+```
+
+
+Binary.
+
+```{r}
+# Define arguments
+df <- df_uni
+cols <- c(EXPOSURES_BINARY[!EXPOSURES_BINARY == "has_hemorrhage"])
+
+# Apply desired formatting to numbers
+format_numbers <- function(x, decimals = 0) {
+  decimals <- paste0("%.", decimals, "f")
+  sprintf(decimals, x)
+}
+
+# Compute new dataset
+df <-
+  df %>%
+  select(all_of(cols), CHOSEN_OUTCOME, has_hemorrhage) %>%
+  drop_na(CHOSEN_OUTCOME, has_hemorrhage)
+
+# Compute descriptive statistics
+desc_stats <-
+  df %>%
+  pivot_longer(
+    cols = -c(CHOSEN_OUTCOME),
+    names_to = "keys",
+    values_to = "values"
+  ) %>%
+  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
+  summarize(
+    num_total = n(),
+    num_missing = sum(is.na(values)),
+    num_with = sum(values, na.rm = TRUE),
+    num_without = sum(!values, na.rm = TRUE),
+    pct_with = mean(values, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    stats = glue::glue("{num_with} ({format_numbers(pct_with*100)}%)"),
+    !!sym(CHOSEN_OUTCOME) := factor(
+      !!sym(CHOSEN_OUTCOME),
+      levels = CHOSEN_OUTCOME_LEVELS,
+      labels = CHOSEN_OUTCOME_LABELS
+    )
+  ) %>%
+  pivot_wider(
+    id_cols = keys,
+    names_from = CHOSEN_OUTCOME,
+    values_from = stats
+  ) %>%
+  relocate(CHOSEN_OUTCOME_LABELS[1], .after = CHOSEN_OUTCOME_LABELS[2])
+
+# Compute p-values
+pvals <-
+  df %>%
+  pivot_longer(
+    cols = -c(CHOSEN_OUTCOME),
+    names_to = "keys",
+    values_to = "values"
+  ) %>%
+  group_by(keys) %>%
+  summarize(
+    pvalue = kruskal.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
+  )
+
+# Synthesize
+out <-
+  desc_stats %>%
+  left_join(pvals)
+
+# Prettify
+num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
+num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
+
+new_col_names <- c(
+  glue::glue("All - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
+  glue::glue("All - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
+  glue::glue("All - P-value")
+)
+
+out <-
+  out %>%
+  rename_with(
+    .cols = !!sym(CHOSEN_OUTCOME_LABELS[2]):pvalue, ~new_col_names
+  ) %>%
+  mutate(
+    keys =
+      ifelse(keys == "has_hemorrhage", "Hemorrhage at presentation", keys)
+  )
+
+# Print
+out_all_binary <- out
+sable(out_all_binary)
+```
+
+Synthesize
+
+```{r}
+out_all <- bind_rows(out_all_continuous, out_all_binary)
+out_all %>% sable()
+```
+
+
+## With hemorrhage
+
+Continuous.
+
+```{r}
+# Define arguments
+df <- df_uni
+cols <- c(EXPOSURES_CONTINUOUS)
+
+# Apply desired formatting to numbers
+format_numbers <- function(x) {
+  sprintf("%.1f", x)
+}
+
+# Compute new dataset
+df <-
+  df %>%
+  select(cols, CHOSEN_OUTCOME, has_hemorrhage) %>%
+  drop_na(CHOSEN_OUTCOME, has_hemorrhage) %>%
+  filter(has_hemorrhage)
+
+# Compute descriptive statistics
+desc_stats <-
+  df %>%
+  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
+  summarize(
+    num_total = n(),
+    num_missing = sum(is.na(values)),
+    mean = mean(values, na.rm = TRUE),
+    sd = sd(values, na.rm = TRUE),
+    min = quantile(values, 0, na.rm = TRUE),
+    max = quantile(values, 1, na.rm = TRUE),
+    q_50 = quantile(values, 0.50, na.rm = TRUE),
+    q_25 = quantile(values, 0.25, na.rm = TRUE),
+    q_75 = quantile(values, 0.75, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    stats = glue::glue("{format_numbers(mean)} ({format_numbers(sd)})"),
+    !!sym(CHOSEN_OUTCOME) := factor(
+      !!sym(CHOSEN_OUTCOME),
+      levels = CHOSEN_OUTCOME_LEVELS,
+      labels = CHOSEN_OUTCOME_LABELS
+    )
+  ) %>%
+  pivot_wider(
+    id_cols = keys,
+    names_from = !!sym(CHOSEN_OUTCOME),
+    values_from = stats
+  ) %>%
+  relocate(CHOSEN_OUTCOME_LABELS[2], .after = CHOSEN_OUTCOME_LABELS[1])
+
+# Compute p-values
+pvals <-
+  df %>%
+  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+  group_by(keys) %>%
+  summarize(
+    pvalue = wilcox.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
+  )
+
+# Synthesize
+out <-
+  desc_stats %>%
+  left_join(pvals)
+
+# Prettify
+num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
+num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
+
+new_col_names <- c(
+  glue::glue("Haem - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
+  glue::glue("Haem - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
+  glue::glue("Haem - P-value")
+)
+
+out <-
+  out %>%
+  rename_with(
+    .cols = !!sym(CHOSEN_OUTCOME_LABELS[1]):pvalue, ~new_col_names
+  ) %>%
+  mutate(
+    keys = ifelse(keys == "has_hemorrhage", "Hemorrhage at presentation", keys)
+  )
+
+# Print
+out_with_hemorrhage_continuous <- out
+sable(out_with_hemorrhage_continuous)
+```
+
+
+Binary.
+
+```{r}
+# Define arguments
+df <- df_uni
+cols <- c(EXPOSURES_BINARY[!EXPOSURES_BINARY == "has_hemorrhage"])
+
+# Apply desired formatting to numbers
+format_numbers <- function(x, decimals = 0) {
+  decimals <- paste0("%.", decimals, "f")
+  sprintf(decimals, x)
+}
+
+# Compute new dataset
+df <-
+  df %>%
+  select(all_of(cols), CHOSEN_OUTCOME, has_hemorrhage) %>%
+  drop_na(CHOSEN_OUTCOME, has_hemorrhage) %>%
+  filter(has_hemorrhage)
+
+# Compute descriptive statistics
+desc_stats <-
+  df %>%
+  pivot_longer(
+    cols = -c(CHOSEN_OUTCOME),
+    names_to = "keys",
+    values_to = "values"
+  ) %>%
+  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
+  summarize(
+    num_total = n(),
+    num_missing = sum(is.na(values)),
+    num_with = sum(values, na.rm = TRUE),
+    num_without = sum(!values, na.rm = TRUE),
+    pct_with = mean(values, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    stats = glue::glue("{num_with} ({format_numbers(pct_with*100)}%)"),
+    !!sym(CHOSEN_OUTCOME) := factor(
+      !!sym(CHOSEN_OUTCOME),
+      levels = CHOSEN_OUTCOME_LEVELS,
+      labels = CHOSEN_OUTCOME_LABELS
+    )
+  ) %>%
+  pivot_wider(
+    id_cols = keys,
+    names_from = !!sym(CHOSEN_OUTCOME),
+    values_from = stats
+  ) %>%
+  relocate(CHOSEN_OUTCOME_LABELS[1], .after = CHOSEN_OUTCOME_LABELS[2])
+
+# Compute p-values
+pvals <-
+  df %>%
+  pivot_longer(
+    cols = -c(CHOSEN_OUTCOME),
+    names_to = "keys",
+    values_to = "values"
+  ) %>%
+  group_by(keys) %>%
+  summarize(
+    pvalue = kruskal.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
+  )
+
+# Synthesize
+out <-
+  desc_stats %>%
+  left_join(pvals)
+
+# Prettify
+num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
+num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
+
+new_col_names <- c(
+  glue::glue("Haem - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
+  glue::glue("Haem - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
+  glue::glue("Haem - P-value")
+)
+
+out <-
+  out %>%
+  rename_with(
+    .cols = !!sym(CHOSEN_OUTCOME_LABELS[2]):pvalue, ~new_col_names
+  ) %>%
+  mutate(
+    keys = ifelse(keys == "has_hemorrhage", "Hemorrhage at presentation", keys)
+  )
+
+# Print
+out_with_hemorrhage_binary <- out
+sable(out_with_hemorrhage_binary)
+```
+
+
+Synthesize.
+
+```{r}
+# Synthesize
+out_with_hemorrhage <-
+  out_with_hemorrhage_continuous %>%
+  bind_rows(out_with_hemorrhage_binary)
+
+# Print
+sable(out_with_hemorrhage)
+```
+
+
+## Without hemorrhage
+
+Compute statistics within those with no hemorrhage.
+
+```{r}
+# Define arguments
+df <- df_uni
+cols <- c(EXPOSURES_CONTINUOUS)
+
+# Apply desired formatting to numbers
+format_numbers <- function(x) {
+  sprintf("%.1f", x)
+}
+
+# Compute new dataset
+df <-
+  df %>%
+  select(all_of(cols), CHOSEN_OUTCOME, has_hemorrhage) %>%
+  drop_na(CHOSEN_OUTCOME, has_hemorrhage) %>%
+  filter(!has_hemorrhage)
+
+# Compute descriptive statistics
+desc_stats <-
+  df %>%
+  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
+  summarize(
+    num_total = n(),
+    num_missing = sum(is.na(values)),
+    mean = mean(values, na.rm = TRUE),
+    sd = sd(values, na.rm = TRUE),
+    min = quantile(values, 0, na.rm = TRUE),
+    max = quantile(values, 1, na.rm = TRUE),
+    q_50 = quantile(values, 0.50, na.rm = TRUE),
+    q_25 = quantile(values, 0.25, na.rm = TRUE),
+    q_75 = quantile(values, 0.75, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    stats = glue::glue("{format_numbers(mean)} ({format_numbers(sd)})"),
+    !!sym(CHOSEN_OUTCOME) := factor(
+      !!sym(CHOSEN_OUTCOME),
+      levels = CHOSEN_OUTCOME_LEVELS,
+      labels = CHOSEN_OUTCOME_LABELS
+    )
+  ) %>%
+  pivot_wider(
+    id_cols = keys,
+    names_from = !!sym(CHOSEN_OUTCOME),
+    values_from = stats
+  ) %>%
+  relocate(CHOSEN_OUTCOME_LABELS[2], .after = CHOSEN_OUTCOME_LABELS[1])
+
+# Compute p-values
+pvals <-
+  df %>%
+  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+  group_by(keys) %>%
+  summarize(
+    pvalue = wilcox.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
+  )
+
+# Synthesize
+out <-
+  desc_stats %>%
+  left_join(pvals)
+
+# Prettify
+num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
+num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
+
+new_col_names <- c(
+  glue::glue("No haem - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
+  glue::glue("No haem - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
+  glue::glue("No haem - P-value")
+)
+
+out <-
+  out %>%
+  rename_with(
+    .cols = !!sym(CHOSEN_OUTCOME_LABELS[1]):pvalue, ~new_col_names
+  ) %>%
+  mutate(
+    keys = ifelse(keys == "has_hemorrhage", "Hemorrhage at presentation", keys)
+  )
+
+# Print
+out_without_hemorrhage_continuous <- out
+sable(out_without_hemorrhage_continuous)
+```
+
+
+Binary.
+
+```{r}
+# Define arguments
+df <- df_uni
+cols <- c(EXPOSURES_BINARY[!EXPOSURES_BINARY == "has_hemorrhage"])
+
+# Apply desired formatting to numbers
+format_numbers <- function(x, decimals = 0) {
+  decimals <- paste0("%.", decimals, "f")
+  sprintf(decimals, x)
+}
+
+# Compute new dataset
+df <-
+  df %>%
+  select(all_of(cols), CHOSEN_OUTCOME, has_hemorrhage) %>%
+  drop_na(CHOSEN_OUTCOME, has_hemorrhage) %>%
+  filter(!has_hemorrhage)
+
+# Compute descriptive statistics
+desc_stats <-
+  df %>%
+  pivot_longer(
+    cols = -c(CHOSEN_OUTCOME),
+    names_to = "keys",
+    values_to = "values"
+  ) %>%
+  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
+  summarize(
+    num_total = n(),
+    num_missing = sum(is.na(values)),
+    num_with = sum(values, na.rm = TRUE),
+    num_without = sum(!values, na.rm = TRUE),
+    pct_with = mean(values, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    stats = glue::glue("{num_with} ({format_numbers(pct_with*100)}%)"),
+    !!sym(CHOSEN_OUTCOME) := factor(
+      !!sym(CHOSEN_OUTCOME),
+      levels = CHOSEN_OUTCOME_LEVELS,
+      labels = CHOSEN_OUTCOME_LABELS
+    )
+  ) %>%
+  pivot_wider(
+    id_cols = keys,
+    names_from = !!sym(CHOSEN_OUTCOME),
+    values_from = stats
+  ) %>%
+  relocate(CHOSEN_OUTCOME_LABELS[1], .after = CHOSEN_OUTCOME_LABELS[2])
+
+# Compute p-values
+pvals <-
+  df %>%
+  pivot_longer(
+    cols = -c(CHOSEN_OUTCOME),
+    names_to = "keys",
+    values_to = "values"
+  ) %>%
+  group_by(keys) %>%
+  summarize(
+    pvalue = kruskal.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
+  )
+
+# Synthesize
+out <-
+  desc_stats %>%
+  left_join(pvals)
+
+# Prettify
+num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
+num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
+
+new_col_names <- c(
+  glue::glue("No haem - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
+  glue::glue("No haem - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
+  glue::glue("No haem - P-value")
+)
+
+out <-
+  out %>%
+  rename_with(
+    .cols = !!sym(CHOSEN_OUTCOME_LABELS[2]):pvalue, ~new_col_names
+  ) %>%
+  mutate(
+    keys = ifelse(keys == "has_hemorrhage", "Hemorrhage at presentation", keys)
+  )
+
+# Print
+out_without_hemorrhage_binary <- out
+sable(out_without_hemorrhage_binary)
+```
+
+
+Synthesize.
+
+```{r}
+# Synthesize
+out_without_hemorrhage <-
+  out_without_hemorrhage_continuous %>%
+  bind_rows(out_without_hemorrhage_binary)
+
+# Print
+sable(out_without_hemorrhage)
+```
+
+
+## Synthesize all
+
+```{r}
+# Synthesize
+out_complete <-
+  out_all %>%
+  left_join(out_with_hemorrhage, by = "keys") %>%
+  left_join(out_without_hemorrhage, by = "keys") %>%
+  arrange(`All - P-value`)
+
+# Print
+out_complete %>%
+  sable()
+```
+
+
+------------------------------------------------------------------------
+
+# Compute - Associations
+
+Correlation matrix.
+
+```{r, fig.height=8, fig.width=8}
+# Create new dataframe
+df_ <-
+  df_uni %>%
+  select(
+    EXPOSURES_CONTINUOUS,
+    EXPOSURES_BINARY,
+    EXPOSURES_CATEGORICAL,
+    OUTCOMES
+  )
+
+# Convert the outcome variable to numeric for correlation calculation
+df_ <-
+  df_ %>%
+  select(where(is.numeric), where(is.logical)) %>%
+  mutate(across(everything(), as.numeric))
+
+# Compute the correlation matrix
+cor_matrix <- cor(df_, use = "complete.obs", method = "spearman")
+
+# Plot the correlation matrix
+ggcorrplot::ggcorrplot(
+  cor_matrix,
+  method = "circle",
+  lab = TRUE,
+  lab_size = 2,
+  colors = c("red", "white", "green4"),
+  title = "Correlation Matrix",
+  hc.order = TRUE,
+) +
+  theme(
+    axis.text.x = element_text(size = 8), # Adjust x-axis text size
+    axis.text.y = element_text(size = 8) # Adjust y-axis text size
+  )
+```
+
+
+------------------------------------------------------------------------
+
+# Compute - Univariable
+
+## Setup
+
+Define function.
+
+```{r}
+fit_model <- function(
+    df = df_uni, cols = cols, is_sandwich = T) {
+  # Initialize
+  out <- list()
+
+  for (i in seq_along(cols)) {
+    # Create formula
+    model <- as.formula(paste(CHOSEN_OUTCOME, "~", cols[i]))
+
+    fit <- suppressWarnings(glm(
+      model,
+      data = df,
+      family = binomial()
+    ))
+
+    if (is_sandwich) {
+      # Calculate robust standard errors (sandwich)
+      robust_se <- sandwich::vcovHC(fit, type = "HC0")
+      # Compute robust confidence intervals
+      fit_results <- lmtest::coeftest(fit, vcov. = robust_se)
+    } else {
+      fit_results <- fit
+    }
+
+    # Summarize model coefficients
+    fit_summary <-
+      fit_results %>%
+      # broom does not support exponentiation after coeftest so do it manually
+      broom::tidy(conf.int = T) %>%
+      mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+      arrange(term == "(Intercept)", p.value) %>%
+      rename(odds_ratio = estimate, z_value = statistic)
+
+    # Stylize and print
+    stylized <-
+      fit_summary %>%
+      rename(
+        "Predictors" = term,
+        "Odds Ratios (OR)" = odds_ratio,
+        "SE" = std.error,
+        "Z-scores" = z_value,
+        "P-values" = p.value,
+        "CI (low)" = conf.low,
+        "CI (high)" = conf.high,
+      ) %>%
+      mutate(
+        `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+        `SE` = round(`SE`, 2),
+        `CI (low)` = round(`CI (low)`, 2),
+        `CI (high)` = round(`CI (high)`, 2),
+        `P-values` = round(`P-values`, 3),
+      )
+
+    out[[i]] <- stylized
+  }
+  return(out)
+}
+```
+
+
+## Unadjusted - Original
+
+Fit logistic.
+
+```{r}
+# Define cols
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Fit model
+out <- fit_model(df = df_uni, cols = cols, is_sandwich = T)
+
+# Create table
+univariable_unadjusted <-
+  out %>%
+  bind_rows() %>%
+  filter(Predictors != "(Intercept)") %>%
+  filter(`CI (high)` < 50) %>%
+  arrange(`P-values`)
+
+# Print
+univariable_unadjusted %>%
+  sable()
+```
+
+
+## Adjusted - Original
+
+Fit logistic.
+
+```{r}
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Initialize
+out <- list()
+df <- df_uni
+
+for (i in seq_along(cols)) {
+  # Create formula
+  model <- as.formula(paste(
+    CHOSEN_OUTCOME,
+    "~",
+    "age_at_first_treatment_yrs + is_male +",
+    cols[i]
+  ))
+
+  fit <- suppressWarnings(glm(
+    model,
+    data = df,
+    family = binomial()
+  ))
+
+  # Calculate robust standard errors (sandwich)
+  robust_se <- sandwich::vcovHC(fit, type = "HC0")
+  # Compute robust confidence intervals
+  robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+
+  # Summarize model coefficients
+  fit_summary <-
+    robust_ci %>%
+    # broom does not support exponentiation after coeftest so do it manually
+    broom::tidy(conf.int = T) %>%
+    mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+    arrange(term == "(Intercept)", p.value) %>%
+    rename(odds_ratio = estimate, z_value = statistic)
+
+  # Stylize and print
+  stylized <-
+    fit_summary %>%
+    rename(
+      "Predictors" = term,
+      "Odds Ratios (OR)" = odds_ratio,
+      "SE" = std.error,
+      "Z-scores" = z_value,
+      "P-values" = p.value,
+      "CI (low)" = conf.low,
+      "CI (high)" = conf.high,
+    ) %>%
+    mutate(
+      `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+      `SE` = round(`SE`, 2),
+      `CI (low)` = round(`CI (low)`, 2),
+      `CI (high)` = round(`CI (high)`, 2),
+      `P-values` = round(`P-values`, 3),
+    )
+
+  out[[i]] <- stylized
+}
+```
+
+
+Print results.
+
+```{r}
+# Create table
+univariable_adjusted <-
+  out %>%
+  bind_rows() %>%
+  filter(Predictors != "(Intercept)") %>%
+  filter(!str_starts(Predictors, "age_at_first_treatment_yrs|is_male")) %>%
+  filter(`CI (high)` < 50) %>%
+  arrange(`P-values`)
+
+# Print
+univariable_adjusted %>%
+  sable()
+```
+
+
+## Unadjusted - Recoded
+
+Fit logistic.
+
+```{r}
+# Define columns
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Initialize
+out <- list()
+df <- df_multi
+
+for (i in seq_along(cols)) {
+  # Create formula
+  model <- as.formula(paste(CHOSEN_OUTCOME, "~", cols[i]))
+
+  fit <- suppressWarnings(glm(
+    model,
+    data = df,
+    family = binomial()
+  ))
+
+  # Calculate robust standard errors (sandwich)
+  robust_se <- sandwich::vcovHC(fit, type = "HC0")
+  # Compute robust confidence intervals
+  robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+
+  # Summarize model coefficients
+  fit_summary <-
+    robust_ci %>%
+    # broom does not support exponentiation after coeftest so do it manually
+    broom::tidy(conf.int = T) %>%
+    mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+    arrange(term == "(Intercept)", p.value) %>%
+    rename(odds_ratio = estimate, z_value = statistic)
+
+  # Stylize and print
+  stylized <-
+    fit_summary %>%
+    rename(
+      "Predictors" = term,
+      "Odds Ratios (OR)" = odds_ratio,
+      "SE" = std.error,
+      "Z-scores" = z_value,
+      "P-values" = p.value,
+      "CI (low)" = conf.low,
+      "CI (high)" = conf.high,
+    ) %>%
+    mutate(
+      `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+      `SE` = round(`SE`, 2),
+      `CI (low)` = round(`CI (low)`, 2),
+      `CI (high)` = round(`CI (high)`, 2),
+      `P-values` = round(`P-values`, 3),
+    )
+
+  out[[i]] <- stylized
+}
+```
+
+
+Print results.
+
+```{r}
+# Create table
+univariable_unadjusted_recoded <-
+  out %>%
+  bind_rows() %>%
+  filter(Predictors != "(Intercept)") %>%
+  filter(`CI (high)` < 50) %>%
+  arrange(`P-values`)
+
+# Print
+univariable_unadjusted_recoded %>%
+  sable()
+```
+
+
+## Adjusted - Recoded
+
+Fit logistic.
+
+```{r}
+# Define columns
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Initialize
+out <- list()
+df <- df_multi
+
+for (i in seq_along(cols)) {
+  # Create formula
+  model <- as.formula(paste(
+    CHOSEN_OUTCOME,
+    "~",
+    "age_at_first_treatment_yrs + is_male +",
+    cols[i]
+  ))
+
+  fit <- suppressWarnings(glm(
+    model,
+    data = df,
+    family = binomial()
+  ))
+
+  # Calculate robust standard errors (sandwich)
+  robust_se <- sandwich::vcovHC(fit, type = "HC0")
+  # Compute robust confidence intervals
+  robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+
+  # Summarize model coefficients
+  fit_summary <-
+    robust_ci %>%
+    # broom does not support exponentiation after coeftest so do it manually
+    broom::tidy(conf.int = T) %>%
+    mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+    arrange(term == "(Intercept)", p.value) %>%
+    rename(odds_ratio = estimate, z_value = statistic)
+
+  # Stylize and print
+  stylized <-
+    fit_summary %>%
+    rename(
+      "Predictors" = term,
+      "Odds Ratios (OR)" = odds_ratio,
+      "SE" = std.error,
+      "Z-scores" = z_value,
+      "P-values" = p.value,
+      "CI (low)" = conf.low,
+      "CI (high)" = conf.high,
+    ) %>%
+    mutate(
+      `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+      `SE` = round(`SE`, 2),
+      `CI (low)` = round(`CI (low)`, 2),
+      `CI (high)` = round(`CI (high)`, 2),
+      `P-values` = round(`P-values`, 3),
+    )
+
+  out[[i]] <- stylized
+}
+```
+
+
+Print results.
+
+```{r}
+# Create table
+univariable_adjusted_recoded <-
+  out %>%
+  bind_rows() %>%
+  filter(Predictors != "(Intercept)") %>%
+  filter(!str_starts(Predictors, "age_at_first_treatment_yrs|is_male")) %>%
+  filter(`CI (high)` < 50) %>%
+  arrange(`P-values`)
+
+# Print
+univariable_adjusted_recoded %>%
+  sable()
+```
+
+
+
+------------------------------------------------------------------------
+
+# Compute - Uni - Interaction
+
+## Adjusted - Recoded
+
+Fit logistic.
+
+```{r}
+# Define columns
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Remove unwanted columns
+unwanted <- c("modified_rankin_score_final")
+cols <- cols[!cols %in% unwanted]
+
+adjustors <- c(
+  "age_at_first_treatment_yrs",
+  "is_male"
+)
+
+# Initialize
+out <- list()
+df <- df_multi
+k <- 1
+
+for (i in seq_along(cols)) {
+  # Do not fit model for variables that we are adjusting for
+  if (cols[i] %in% adjustors) {
+    next
+  }
+
+  # Create formula
+  model <- as.formula(paste(
+    CHOSEN_OUTCOME,
+    "~",
+    "age_at_first_treatment_yrs + is_male +",
+    cols[i],
+    "* has_hemorrhage",
+    sep = ""
+  ))
+
+  fit <- suppressWarnings(glm(
+    model,
+    data = df,
+    family = binomial()
+  ))
+
+  # Calculate robust standard errors (sandwich)
+  robust_se <- sandwich::vcovHC(fit, type = "HC0")
+  # Compute robust confidence intervals
+  robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+
+  # Summarize model coefficients
+  fit_summary <-
+    robust_ci %>%
+    # broom does not support exponentiation after coeftest so do it manually
+    broom::tidy(conf.int = T) %>%
+    mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+    arrange(term == "(Intercept)", p.value) %>%
+    rename(odds_ratio = estimate, z_value = statistic)
+
+  # Stylize and print
+  stylized <-
+    fit_summary %>%
+    rename(
+      "Predictors" = term,
+      "Odds Ratios (OR)" = odds_ratio,
+      "SE" = std.error,
+      "Z-scores" = z_value,
+      "P-values" = p.value,
+      "CI (low)" = conf.low,
+      "CI (high)" = conf.high,
+    ) %>%
+    mutate(
+      `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+      `SE` = round(`SE`, 2),
+      `CI (low)` = round(`CI (low)`, 2),
+      `CI (high)` = round(`CI (high)`, 2),
+      `P-values` = round(`P-values`, 3),
+    )
+
+  out[[k]] <- stylized
+  k <- k + 1
+}
+```
+
+
+Print all results results.
+
+```{r}
+# Define values
+unwanted <- c(
+  "is_maleTRUE",
+  "age_at_first_treatment_yrs",
+  "(Intercept)",
+  "has_hemorrhageTRUE"
+)
+
+# Initialize objects
+isolated_values <- list()
+
+# Get main and interaction effects
+for (i in seq_along(out)) {
+  # Get data
+  result <- out[[i]]
+
+  # Get all main effects of interest
+  main_effects <-
+    result %>%
+    filter(!Predictors %in% unwanted) %>%
+    filter(!str_detect(Predictors, ":")) %>%
+    select(-"SE", -"Z-scores")
+
+  # Get the interaction effects
+  interaction_effects <-
+    result %>%
+    filter(!Predictors %in% unwanted) %>%
+    filter(str_detect(Predictors, ":")) %>%
+    mutate(Predictors = str_extract(Predictors, "^[^:]+")) %>%
+    select(-"SE", -"Z-scores") %>%
+    rename_with(~ paste("Interaction -", .), -Predictors)
+
+  isolated_values[[i]] <-
+    main_effects %>%
+    left_join(interaction_effects, by = "Predictors")
+}
+```
+
+
+Create and print table
+
+```{r}
+# Create table
+univariable_adjusted_recoded_interactions <-
+  isolated_values %>%
+  bind_rows() %>%
+  arrange(`Interaction - P-values`)
+
+# Print
+univariable_adjusted_recoded_interactions %>%
+  sable()
+```
+
+
+Eloquence.
+
+```{r}
+df %>%
+  count(has_hemorrhage, is_eloquent_location, !!sym(CHOSEN_OUTCOME)) %>%
+  drop_na() %>%
+  arrange(has_hemorrhage, is_eloquent_location) %>%
+  group_by(has_hemorrhage, is_eloquent_location) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+
+Deficit.
+
+```{r}
+df %>%
+  count(has_hemorrhage, has_deficit, !!sym(CHOSEN_OUTCOME)) %>%
+  drop_na() %>%
+  arrange(has_hemorrhage, has_deficit) %>%
+  group_by(has_hemorrhage, has_deficit) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+
+Seizures.
+
+```{r}
+df %>%
+  count(has_hemorrhage, has_seizures, !!sym(CHOSEN_OUTCOME)) %>%
+  drop_na() %>%
+  arrange(has_hemorrhage, has_seizures) %>%
+  group_by(has_hemorrhage, has_seizures) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+
+------------------------------------------------------------------------
+
+# Compute - Multivariable - Without grading scores
+
+## Setup
+
+```{r}
+unwanted_without_gradings <- c(
+  # Spetzler-Martin grade (size score + eloquent location + venous drainage)
+  "spetzler_martin_grade",
+  "size_score", # Already covered by the more detailed max_size_cm
+  "venous_drainage", # Already covered by has_deep_venous_drainage
+  "location", # Already covered to some extent by eloquence
+  # Lawton-Young grade (SM + age + diffuse nidus + hemorrhage)
+  # (SM is heavily overlapping with LY, so include its components)
+  "lawton_young_grade",
+  # Use values at or before first treatment
+  "modified_rankin_score_final",
+  "modified_rankin_score_postop_within_1_week",
+  # Use mRS pre-treatment (more predictive)
+  "modified_rankin_score_presentation"
+  # "modified_rankin_score_pretreatment"
+)
+
+# Define cols of interest - use grading scores whenever these exist
+unwanted_with_gradings <- c(
+  # Spetzler-Martin grade (size score + eloquent location + venous drainage)
+  "size_score",
+  "max_size_cm",
+  "is_eloquent_location",
+  # "location",  # Include this as not highly correlated with SM
+  "has_deep_venous_drainage",
+  "venous_drainage",
+  # Lawton-Young grade (SM + age + diffuse nidus + hemorrhage)
+  # (SM is heavily overlapping with LY, so include its components)
+  "lawton_young_grade",
+  # "is_diffuse_nidus",
+  # "has_hemorrhage",
+  # Use values at or before first treatment
+  "modified_rankin_score_final",
+  "modified_rankin_score_postop_within_1_week",
+  # Use mRS pre-treatment (more predictive)
+  "modified_rankin_score_presentation"
+  # "modified_rankin_score_pretreatment"
+)
+```
+
+
+## Feature selection
+
+Create predictors.
+
+```{r}
+# # Unwanted
+# unwanted <- c(
+#   # Highly correlated with SM grade but SM is more predictive
+#   "lawton_young_grade",
+#   # Highly correlated with SM grade but SM is more predictive
+#   "max_size_cm",
+#   # Highly correlated with SM grade but SM grade is more predictive
+#   "size_score",
+#   # Highly correlated with SM grade but SM grade is more predictive
+#   "dvd_score",
+#   # Highly correlated with SM grade but SM grade is more predictive
+#   "eloquence_score",
+#   # Highly correlated with mRS pre-tx but mRS pre-tx is more predictive
+#   "modified_rankin_score_presentation",
+#   # Stick to values before first treatment
+#   "modified_rankin_score_postop_within_1_week"
+# )
+
+# Define p-value threshold
+pval_threshold <- 0.2
+
+# Get the predictors of interest
+predictors <-
+  univariable_unadjusted %>%
+  bind_rows(univariable_adjusted) %>%
+  filter(`P-values` < pval_threshold) %>%
+  pull(`Predictors`)
+
+# Clean categorical variables
+predictors <-
+  predictors %>%
+  str_replace("^([a-z0-9_]*)([A-Z].*)$", "\\1") %>%
+  unique()
+
+# Add adjustment variables
+predictors <- unique(c(predictors))
+
+# Remove unwanted predictors
+predictors <- predictors[!predictors %in% unwanted_without_gradings]
+
+# Print
+print(predictors)
+```
+
+
+## Model selection
+
+Fit logistic.
+
+```{r}
+# Define data
+df <- df_multi %>% drop_na(modified_rankin_score_pretreatment, location)
+
+# Create formula
+model <- as.formula(paste(
+  CHOSEN_OUTCOME,
+  "~",
+  paste(predictors, collapse = " + ")
+))
+
+fit <- glm(
+  model,
+  data = df,
+  family = binomial()
+)
+
+# Save
+fit_without_grading <- fit
+```
+
+
+Print results.
+
+```{r}
+# Summarize model coefficients
+fit_summary <-
+  fit %>%
+  broom::tidy(exponentiate = T, conf.int = T) %>%
+  arrange(term == "(Intercept)", p.value) %>%
+  rename(odds_ratio = estimate, z_value = statistic)
+
+# Stylize and print
+stylized <-
+  fit_summary %>%
+  rename(
+    "Predictors" = term,
+    "Odds Ratios (OR)" = odds_ratio,
+    "SE" = std.error,
+    "Z-scores" = z_value,
+    "P-values" = p.value,
+    "CI (low)" = conf.low,
+    "CI (high)" = conf.high,
+  ) %>%
+  mutate(
+    `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+    `SE` = round(`SE`, 2),
+    `CI (low)` = round(`CI (low)`, 2),
+    `CI (high)` = round(`CI (high)`, 2),
+    `P-values` = round(`P-values`, 3),
+  )
+
+# Print
+stylized %>% sable()
+```
+
+
+## Inference
+
+Create robust CIs using the sandwich estimator.
+
+```{r}
+# Calculate robust standard errors
+robust_se <- sandwich::vcovHC(fit, type = "HC0")
+
+# Compute robust confidence intervals
+robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+```
+
+
+Stylize results.
+
+```{r}
+# Summarize model coefficients
+fit_summary <-
+  robust_ci %>%
+  # broom does not support exponentiation after coeftest so do it manually
+  broom::tidy(exponentiate = F, conf.int = T) %>%
+  mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+  arrange(term == "(Intercept)", p.value) %>%
+  rename(odds_ratio = estimate, z_value = statistic)
+
+# Stylize and print
+multivariable_pvalue <-
+  fit_summary %>%
+  rename(
+    "Predictors" = term,
+    "Odds Ratios (OR)" = odds_ratio,
+    "SE" = std.error,
+    "Z-scores" = z_value,
+    "P-values" = p.value,
+    "CI (low)" = conf.low,
+    "CI (high)" = conf.high,
+  ) %>%
+  mutate(
+    `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+    `SE` = round(`SE`, 2),
+    `CI (low)` = round(`CI (low)`, 2),
+    `CI (high)` = round(`CI (high)`, 2),
+    `P-values` = round(`P-values`, 3),
+  )
+
+# Print
+multivariable_pvalue %>% sable()
+```
+
+
+Plot the coefficients with their confidence intervals.
+
+```{r, fig.height=4, fig.width=6}
+robust_ci %>%
+  # broom does not support exponentiation after coeftest so do it manually
+  broom::tidy(exponentiate = F, conf.int = T) %>%
+  mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+  filter(term != "(Intercept)") %>%
+  arrange(desc(estimate)) %>%
+  mutate(term = factor(term, levels = term)) %>%
+  ggplot(aes(x = estimate, y = term, color = term)) +
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high)) +
+  geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+  labs(x = "Odds ratio", y = NULL) +
+  guides(color = F) +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13)
+  )
+
+# Dotwhisker was not giving me the correct plot
+# dotwhisker::dwplot(
+#   vline = geom_vline(xintercept = 1, linetype = 2, alpha =  0.5),
+#   show_intercept = F
+# )
+```
+
+
+## Predict
+
+Predict.
+
+```{r}
+# Predicted probabilities
+predicted_probs <- predict(fit, type = "response")
+```
+
+
+Plot histogram of predictions.
+
+```{r, fig.width=6, fig.height=6}
+tibble(
+  Predictions = predicted_probs,
+  Truth = fit$model[, CHOSEN_OUTCOME]
+) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "keys",
+    values_to = "values"
+  ) %>%
+  mutate(keys = fct_inorder(keys)) %>%
+  ggplot(aes(x = values, color = keys, fill = keys)) +
+  geom_histogram(alpha = 0.7) +
+  geom_vline(xintercept = 0.5, linetype = 2, alpha = 0.5) +
+  facet_wrap(vars(keys), ncol = 1, scales = "fixed") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text = element_text(size = 12),
+    strip.text.x = element_text(size = 13),
+    legend.position = "none"
+  )
+```
+
+
+## Evaluate
+
+How many examples were used?
+
+```{r}
+# All examples
+num_all_examples <- nrow(fit$data)
+num_all_examples_positive <- sum(fit$data[, CHOSEN_OUTCOME], na.rm = T)
+num_complete_cases <- nrow(fit$model)
+num_complete_cases_positive <- sum(fit$model[, CHOSEN_OUTCOME], na.rm = T)
+
+# Print
+sprintf(
+  "
+  All examples = %s (%s with outcome)
+  Fitted examples = %s (%s with outcome)",
+  num_all_examples,
+  num_all_examples_positive,
+  num_complete_cases,
+  num_complete_cases_positive
+) %>% cat()
+```
+
+
+Residual analysis.
+
+```{r}
+# Residuals
+residuals <- residuals(fit, type = "deviance")
+
+# Plot residuals
+plot(residuals)
+```
+
+
+Pseudo R-squared.
+
+```{r}
+# Calculate Pseudo R-squared values
+pseudo_r2 <- pscl::pR2(fit)
+print(pseudo_r2)
+```
+
+
+ROC-AUC.
+
+```{r}
+# Compute
+auroc <- cvAUC::ci.cvAUC(
+  predictions = predicted_probs,
+  labels = fit$model[, CHOSEN_OUTCOME]
+)
+
+# Print
+sprintf(
+  "Cross-validated AUROC = %.3f (SE, %.3f; %s%% CI, %.3f-%.3f)",
+  auroc$cvAUC,
+  auroc$se,
+  auroc$confidence * 100,
+  auroc$ci[1],
+  auroc$ci[2]
+)
+```
+
+
+PR-AUC.
+
+```{r}
+# Construct object
+precrec_obj_tr <- precrec::evalmod(
+  scores = predicted_probs,
+  labels = fit$model[, CHOSEN_OUTCOME],
+  calc_avg = F,
+  cb_alpha = 0.05
+)
+
+# Print
+# NOTE: Can use precrec::auc_ci to get CIs, but need to have multiple datasets
+precrec_obj_tr %>%
+  precrec::part() %>%
+  precrec::pauc() %>%
+  sable()
+```
+
+
+ROC and PR curves.
+
+<!-- Note that you can specify multiple models to get confidence intervals around the ROC: https://cran.r-project.org/web/packages/precrec/vignettes/introduction.html#:\~:text=evalmod%20and%20mmdata%20with%20cross%20validation%20datasets (without specifying multiple models the `show_cb = T` approach will give an error). -->
+
+```{r, fig.height=3, fig.width=6}
+# Plot
+precrec_obj_tr %>% autoplot()
+```
+
+
+Another version of the ROC curve.
+
+```{r}
+# Calculate ROC curve
+roc_curve <- pROC::roc(fit$model[, CHOSEN_OUTCOME] ~ predicted_probs)
+
+# Plot ROC curve
+plot(roc_curve)
+
+# Calculate AUC
+auc <- pROC::auc(roc_curve)
+print(auc)
+```
+
+
+Plot all performance measures.
+
+```{r, fig.height=6, fig.width=6}
+# Construct object
+precrec_obj_tr2 <- precrec::evalmod(
+  scores = predicted_probs,
+  labels = fit$model[, CHOSEN_OUTCOME],
+  mode = "basic"
+)
+
+# Plot
+precrec_obj_tr2 %>% autoplot()
+```
+
+
+**Confusion matrix.**
+
+**Kappa statistic:** 0 = No agreement; 0.1-0.2 = Slight agreement; 0.2-0.4 = Fair agreement; 0.4-0.6 = Moderate agreement; 0.6-0.8 = Substantial agreement; 0.8 - 1 = Near perfect agreement
+
+**No Information Rate (NIR):** The proportion of the largest observed class - for example, if we had 35 patients and 23 patients had the outcome, this is the largest class and the NIR is 23/35 = 0.657. The larger the deviation of Accuracy from NIR the more confident we are that the model is not just choosing the largest class.
+
+```{r}
+# Scores
+pred <- factor(ifelse(predicted_probs > 0.5, "Event", "No Event"))
+truth <- factor(ifelse(fit$model[, CHOSEN_OUTCOME], "Event", "No Event"))
+
+# Count values per category
+xtab <- table(
+  scores = pred,
+  labels = truth
+)
+
+# Compute
+confusion_matrix <-
+  caret::confusionMatrix(
+    xtab,
+    positive = "Event",
+    prevalence = NULL, # Provide prevalence as a proportion here if you want
+    mode = "sens_spec"
+  )
+
+# Print
+confusion_matrix
+```
+
+
+## Variable importance
+
+Plot importance (based on magnitude of z-score).
+
+```{r, fig.height=4, fig.width=6}
+# Calculate importance
+varimp <-
+  fit %>%
+  caret::varImp() %>%
+  as_tibble(rownames = "rn") %>%
+  mutate(Predictor = factor(rn) %>% fct_reorder(Overall)) %>%
+  dplyr::select(Predictor, Importance = Overall)
+
+# Plot variable importance
+varimp %>%
+  ggplot(aes(Predictor, Importance, fill = Importance)) +
+  geom_bar(stat = "identity", alpha = 0.9, width = 0.65) +
+  coord_flip() +
+  guides(fill = F) +
+  labs(y = "\nVariable Importance", x = NULL) +
+  scale_fill_viridis_c() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x = element_text(margin = margin(t = 7), size = 12),
+    axis.text.y = element_text(margin = margin(r = -10), size = 12),
+    axis.title = element_text(size = 13)
+  )
+```
+
+
+------------------------------------------------------------------------
+
+# Compute - Multivariable - With grading scores
+
+## Feature selection
+
+Create predictors.
+
+```{r}
+# Define p-value threshold
+pval_threshold <- 0.2
+
+# Get the predictors of interest
+predictors <-
+  univariable_unadjusted_recoded %>%
+  bind_rows(univariable_adjusted) %>%
+  filter(`P-values` < pval_threshold) %>%
+  pull(`Predictors`)
+
+# Clean categorical variables
+predictors <-
+  predictors %>%
+  str_replace("^([a-z0-9_]*)([A-Z].*)$", "\\1") %>%
+  unique()
+
+# Add adjustment variables
+predictors <- unique(c(predictors))
+
+# Remove unwanted predictors
+predictors <- predictors[!predictors %in% unwanted_with_gradings]
+
+# Print
+print(predictors)
+```
+
+
+## Model selection
+
+Fit logistic.
+
+```{r}
+# Define data
+df <- df_multi
+
+# Create formula
+model <- as.formula(paste(
+  CHOSEN_OUTCOME,
+  "~",
+  paste(predictors, collapse = " + ")
+))
+
+fit <- glm(
+  model,
+  data = df,
+  family = binomial()
+)
+
+fit_with_grading <- fit
+```
+
+
+Print results.
+
+```{r}
+# Summarize model coefficients
+fit_summary <-
+  fit %>%
+  broom::tidy(exponentiate = T, conf.int = T) %>%
+  arrange(term == "(Intercept)", p.value) %>%
+  rename(odds_ratio = estimate, z_value = statistic)
+
+# Stylize and print
+stylized <-
+  fit_summary %>%
+  rename(
+    "Predictors" = term,
+    "Odds Ratios (OR)" = odds_ratio,
+    "SE" = std.error,
+    "Z-scores" = z_value,
+    "P-values" = p.value,
+    "CI (low)" = conf.low,
+    "CI (high)" = conf.high,
+  ) %>%
+  mutate(
+    `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+    `SE` = round(`SE`, 2),
+    `CI (low)` = round(`CI (low)`, 2),
+    `CI (high)` = round(`CI (high)`, 2),
+    `P-values` = round(`P-values`, 3),
+  )
+
+# Print
+stylized %>% sable()
+```
+
+
+## Inference
+
+Create robust CIs using the sandwich estimator.
+
+```{r}
+# Calculate robust standard errors
+robust_se <- sandwich::vcovHC(fit, type = "HC0")
+
+# Compute robust confidence intervals
+robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+```
+
+
+Stylize results.
+
+```{r}
+# Summarize model coefficients
+fit_summary <-
+  robust_ci %>%
+  # broom does not support exponentiation after coeftest so do it manually
+  broom::tidy(exponentiate = F, conf.int = T) %>%
+  mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+  arrange(term == "(Intercept)", p.value) %>%
+  rename(odds_ratio = estimate, z_value = statistic)
+
+# Stylize and print
+multivariable_pvalue <-
+  fit_summary %>%
+  rename(
+    "Predictors" = term,
+    "Odds Ratios (OR)" = odds_ratio,
+    "SE" = std.error,
+    "Z-scores" = z_value,
+    "P-values" = p.value,
+    "CI (low)" = conf.low,
+    "CI (high)" = conf.high,
+  ) %>%
+  mutate(
+    `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+    `SE` = round(`SE`, 2),
+    `CI (low)` = round(`CI (low)`, 2),
+    `CI (high)` = round(`CI (high)`, 2),
+    `P-values` = round(`P-values`, 3),
+  )
+
+# Print
+multivariable_pvalue %>% sable()
+```
+
+
+Plot the coefficients with their confidence intervals.
+
+```{r, fig.height=4, fig.width=6}
+robust_ci %>%
+  # broom does not support exponentiation after coeftest so do it manually
+  broom::tidy(exponentiate = F, conf.int = T) %>%
+  mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+  filter(term != "(Intercept)") %>%
+  arrange(desc(estimate)) %>%
+  mutate(term = factor(term, levels = term)) %>%
+  ggplot(aes(x = estimate, y = term, color = term)) +
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high)) +
+  geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+  labs(x = "Odds ratio", y = NULL) +
+  guides(color = F) +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13)
+  )
+
+# Dotwhisker was not giving me the correct plot
+# dotwhisker::dwplot(
+#   vline = geom_vline(xintercept = 1, linetype = 2, alpha =  0.5),
+#   show_intercept = F
+# )
+```
+
+
+## Predict
+
+Predict.
+
+```{r}
+# Predicted probabilities
+predicted_probs <- predict(fit, type = "response")
+```
+
+
+Plot histogram of predictions.
+
+```{r, fig.width=6, fig.height=6}
+tibble(
+  Predictions = predicted_probs,
+  Truth = fit$model[, CHOSEN_OUTCOME]
+) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "keys",
+    values_to = "values"
+  ) %>%
+  mutate(keys = fct_inorder(keys)) %>%
+  ggplot(aes(x = values, color = keys, fill = keys)) +
+  geom_histogram(alpha = 0.7) +
+  geom_vline(xintercept = 0.5, linetype = 2, alpha = 0.5) +
+  facet_wrap(vars(keys), ncol = 1, scales = "fixed") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text = element_text(size = 12),
+    strip.text.x = element_text(size = 13),
+    legend.position = "none"
+  )
+```
+
+
+## Evaluate
+
+How many examples were used?
+
+```{r}
+# All examples
+num_all_examples <- nrow(fit$data)
+num_all_examples_positive <- sum(fit$data[, CHOSEN_OUTCOME], na.rm = T)
+num_complete_cases <- nrow(fit$model)
+num_complete_cases_positive <- sum(fit$model[, CHOSEN_OUTCOME], na.rm = T)
+
+# Print
+sprintf(
+  "
+  All examples = %s (%s with outcome)
+  Fitted examples = %s (%s with outcome)",
+  num_all_examples,
+  num_all_examples_positive,
+  num_complete_cases,
+  num_complete_cases_positive
+) %>% cat()
+```
+
+
+Residual analysis.
+
+```{r}
+# Residuals
+residuals <- residuals(fit, type = "deviance")
+
+# Plot residuals
+plot(residuals)
+```
+
+
+Pseudo R-squared.
+
+```{r}
+# Calculate Pseudo R-squared values
+pseudo_r2 <- pscl::pR2(fit)
+print(pseudo_r2)
+```
+
+
+ROC-AUC.
+
+```{r}
+# Compute
+auroc <- cvAUC::ci.cvAUC(
+  predictions = predicted_probs,
+  labels = fit$model[, CHOSEN_OUTCOME]
+)
+
+# Print
+sprintf(
+  "Cross-validated AUROC = %.3f (SE, %.3f; %s%% CI, %.3f-%.3f)",
+  auroc$cvAUC,
+  auroc$se,
+  auroc$confidence * 100,
+  auroc$ci[1],
+  auroc$ci[2]
+)
+```
+
+
+PR-AUC.
+
+```{r}
+# Construct object
+precrec_obj_tr <- precrec::evalmod(
+  scores = predicted_probs,
+  labels = fit$model[, CHOSEN_OUTCOME],
+  calc_avg = F,
+  cb_alpha = 0.05
+)
+
+# Print
+# NOTE: Can use precrec::auc_ci to get CIs, but need to have multiple datasets
+precrec_obj_tr %>%
+  precrec::part() %>%
+  precrec::pauc() %>%
+  sable()
+```
+
+
+ROC and PR curves.
+
+<!-- Note that you can specify multiple models to get confidence intervals around the ROC: https://cran.r-project.org/web/packages/precrec/vignettes/introduction.html#:\~:text=evalmod%20and%20mmdata%20with%20cross%20validation%20datasets (without specifying multiple models the `show_cb = T` approach will give an error). -->
+
+```{r, fig.height=3, fig.width=6}
+# Plot
+precrec_obj_tr %>% autoplot()
+```
+
+
+Another version of the ROC curve.
+
+```{r}
+# Calculate ROC curve
+roc_curve <- pROC::roc(fit$model[, CHOSEN_OUTCOME] ~ predicted_probs)
+
+# Plot ROC curve
+plot(roc_curve)
+
+# Calculate AUC
+auc <- pROC::auc(roc_curve)
+print(auc)
+```
+
+
+Plot all performance measures.
+
+```{r, fig.height=6, fig.width=6}
+# Construct object
+precrec_obj_tr2 <- precrec::evalmod(
+  scores = predicted_probs,
+  labels = fit$model[, CHOSEN_OUTCOME],
+  mode = "basic"
+)
+
+# Plot
+precrec_obj_tr2 %>% autoplot()
+```
+
+
+**Confusion matrix.**
+
+**Kappa statistic:** 0 = No agreement; 0.1-0.2 = Slight agreement; 0.2-0.4 = Fair agreement; 0.4-0.6 = Moderate agreement; 0.6-0.8 = Substantial agreement; 0.8 - 1 = Near perfect agreement
+
+**No Information Rate (NIR):** The proportion of the largest observed class - for example, if we had 35 patients and 23 patients had the outcome, this is the largest class and the NIR is 23/35 = 0.657. The larger the deviation of Accuracy from NIR the more confident we are that the model is not just choosing the largest class.
+
+```{r}
+# Scores
+pred <- factor(ifelse(predicted_probs > 0.5, "Event", "No Event"))
+truth <- factor(ifelse(fit$model[, CHOSEN_OUTCOME], "Event", "No Event"))
+
+# Count values per category
+xtab <- table(
+  scores = pred,
+  labels = truth
+)
+
+# Compute
+confusion_matrix <-
+  caret::confusionMatrix(
+    xtab,
+    positive = "Event",
+    prevalence = NULL, # Provide prevalence as a proportion here if you want
+    mode = "sens_spec"
+  )
+
+# Print
+confusion_matrix
+```
+
+
+## Variable importance
+
+Plot importance (based on magnitude of z-score).
+
+```{r, fig.height=4, fig.width=6}
+# Calculate importance
+varimp <-
+  fit %>%
+  caret::varImp() %>%
+  as_tibble(rownames = "rn") %>%
+  mutate(Predictor = factor(rn) %>% fct_reorder(Overall)) %>%
+  dplyr::select(Predictor, Importance = Overall)
+
+# Plot variable importance
+varimp %>%
+  ggplot(aes(Predictor, Importance, fill = Importance)) +
+  geom_bar(stat = "identity", alpha = 0.9, width = 0.65) +
+  coord_flip() +
+  guides(fill = F) +
+  labs(y = "\nVariable Importance", x = NULL) +
+  scale_fill_viridis_c() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    panel.border = element_blank(),
+    axis.text.x = element_text(margin = margin(t = 7), size = 12),
+    axis.text.y = element_text(margin = margin(r = -10), size = 12),
+    axis.title = element_text(size = 13)
+  )
+```
+
+
+------------------------------------------------------------------------
+
+# Compute - Compare models
+
+No statistical evidence that the grading-based model fits the data better than the grading-independent model based on the likelihood ratio test.
+
+```{r}
+anova(fit_without_grading, fit_with_grading, test = "LR")
+```
+
+
+------------------------------------------------------------------------
+
+
+# Compute - Multi - Interaction
+
+## Presents with hemorrhage
+
+Fit logistic.
+
+```{r}
+# Define data
+df <- df_multi
+
+# Create formula
+model <- as.formula(paste(
+  CHOSEN_OUTCOME,
+  "~",
+  "modified_rankin_score_pretreatment*has_hemorrhage +
+  spetzler_martin_grade*has_hemorrhage +
+  age_at_first_treatment_yrs*has_hemorrhage"
+))
+
+fit <- glm(
+  model,
+  data = df,
+  family = binomial()
+)
+```
+
+
+Print results.
+
+```{r}
+# Summarize model coefficients
+fit_summary <-
+  fit %>%
+  broom::tidy(exponentiate = T, conf.int = T) %>%
+  arrange(term == "(Intercept)", p.value) %>%
+  rename(odds_ratio = estimate, z_value = statistic)
+
+# Stylize and print
+stylized <-
+  fit_summary %>%
+  rename(
+    "Predictors" = term,
+    "Odds Ratios (OR)" = odds_ratio,
+    "SE" = std.error,
+    "Z-scores" = z_value,
+    "P-values" = p.value,
+    "CI (low)" = conf.low,
+    "CI (high)" = conf.high,
+  ) %>%
+  mutate(
+    `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+    `SE` = round(`SE`, 2),
+    `CI (low)` = round(`CI (low)`, 2),
+    `CI (high)` = round(`CI (high)`, 2),
+    `P-values` = round(`P-values`, 3),
+  )
+
+# Print
+stylized %>% sable()
+```
+
+
+------------------------------------------------------------------------
+
+# Compute - Selective inference
+
+Read the following guides:
+- [How to use glmnet](https://glmnet.stanford.edu/articles/glmnet.html)
+- [Selective inference using forward selection](https://stephens999.github.io/misc/selective_inference_toy.html)
+
+## Setup
+
+Create dataset.
+
+```{r}
+# Define cols of interest - use grading scores whenever these exist
+unwanted_with_gradings <- c(
+  # Spetzler-Martin grade (size score + eloquent location + venous drainage)
+  "size_score",
+  "max_size_cm",
+  "is_eloquent_location",
+  # "location",  # Include this as not highly correlated with SM
+  "has_deep_venous_drainage",
+  "venous_drainage",
+  # Lawton-Young grade (SM + age + diffuse nidus + hemorrhage)
+  # (SM is heavily overlapping with LY, so include its components)
+  "lawton_young_grade",
+  # "is_diffuse_nidus",
+  # "has_hemorrhage",
+  # Use values at or before first treatment
+  "modified_rankin_score_final",
+  "modified_rankin_score_postop_within_1_week",
+  # Use mRS pre-treatment (more predictive)
+  "modified_rankin_score_presentation"
+  # "modified_rankin_score_pretreatment"
+)
+
+unwanted_without_gradings <- c(
+  # Spetzler-Martin grade (size score + eloquent location + venous drainage)
+  "spetzler_martin_grade",
+  "size_score", # Already covered by the more detailed max_size_cm
+  "venous_drainage", # Already covered by has_deep_venous_drainage
+  "location", # Already covered to some extent by eloquence
+  # Lawton-Young grade (SM + age + diffuse nidus + hemorrhage)
+  # (SM is heavily overlapping with LY, so include its components)
+  "lawton_young_grade",
+  # Use values at or before first treatment
+  "modified_rankin_score_final",
+  "modified_rankin_score_postop_within_1_week",
+  # Use mRS pre-treatment (more predictive)
+  "modified_rankin_score_presentation"
+  # "modified_rankin_score_pretreatment"
+)
+
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL,
+  CHOSEN_OUTCOME
+))
+
+cols_with_gradings <- cols[!cols %in% unwanted_with_gradings]
+cols_without_gradings <- cols[!cols %in% unwanted_without_gradings]
+
+# Create df of interest
+df_with_gradings <-
+  # Use the non-recoded dataset
+  df_uni %>%
+  dplyr::select(all_of(cols_with_gradings)) %>%
+  drop_na()
+
+df_without_gradings <-
+  # Use the non-recoded dataset
+  df_uni %>%
+  dplyr::select(all_of(cols_without_gradings)) %>%
+  drop_na()
+
+# Create matrix
+frla <- as.formula(paste(CHOSEN_OUTCOME, " ~ . - 1"))
+X_with_gradings <- model.matrix(frla, df_with_gradings)
+y_with_gradings <- df_with_gradings %>%
+  pull(CHOSEN_OUTCOME) %>%
+  as.numeric()
+X_without_gradings <- model.matrix(frla, df_without_gradings)
+y_without_gradings <- df_without_gradings %>%
+  pull(CHOSEN_OUTCOME) %>%
+  as.numeric()
+
+# X should be centered for LASSO (necessary for glmnet)
+# (scale = FALSE as this is done by the standardization step in glmnet)
+X_with_gradings_scaled <- scale(X_with_gradings, center = TRUE, scale = FALSE)
+X_without_gradings_scaled <- scale(X_without_gradings, center = TRUE, scale = FALSE)
+
+# See the names of X to match column numbers to column names later on
+colnames(X_without_gradings_scaled)
+```
+
+
+## Stepwise
+
+Use step-wise linear regression methods.
+
+```{r}
+# Set seed
+set.seed(33)
+
+# Run forward step-wise
+fsfit <- fs(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  maxsteps = 2000,
+  intercept = TRUE,
+  normalize = FALSE
+)
+
+# Estimate sigma
+sigmahat <- estimateSigma(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  intercept = TRUE,
+  standardize = FALSE
+)$sigmahat
+```
+
+```{r}
+# Compute sequential p-values and confidence intervals - for all
+# (sigma estimated from full model)
+out.seq <- fsInf(fsfit, type = "active", sigma = sigmahat)
+out.seq
+```
+
+```{r}
+# Compute p-values and confidence intervals after AIC stopping - for selected
+out.aic <- fsInf(fsfit, type = "aic", sigma = sigmahat)
+out.aic
+```
+
+```{r}
+# Compute p-values and confidence intervals after 5 fixed steps
+out.fix <- fsInf(fsfit, type = "all", k = 5, sigma = sigmahat)
+out.fix
+```
+
+
+## LASSO - linear regression
+
+Use LASSO linear regression not based on previous gradings.
+
+```{r}
+# Set seed
+set.seed(141704)
+
+# Perform cross-validation
+# (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
+cv_fit <- cv.glmnet(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  family = "gaussian",
+  alpha = 1,
+  nfolds = 10
+)
+
+# Extract the best lambda
+best_lambda_min <- cv_fit$lambda.min
+best_lambda_1se <- cv_fit$lambda.1se
+
+# Run glmnet
+gfit <- glmnet(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  family = "gaussian",
+  alpha = 1,
+  lambda = c(best_lambda_min, best_lambda_1se),
+  intercept = TRUE,
+  standardize = TRUE
+)
+
+# Extract coef for a given lambda - avoid the intercept term
+# (given the small number of observations hence large SD, use min lambda)
+lambda <- best_lambda_min
+n <- nrow(y_without_gradings)
+beta <- coef(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  object = gfit,
+  s = lambda,
+  exact = TRUE
+)[-1]
+
+# Estimate sigma
+gsigmahat <- estimateSigma(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  intercept = TRUE,
+  standardize = TRUE
+)$sigmahat
+
+# Compute fixed lambda p-values and selection intervals
+out <- fixedLassoInf(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  beta = beta,
+  lambda = lambda,
+  family = "gaussian",
+  intercept = TRUE,
+  sigma = gsigmahat
+)
+
+# Prettify
+tibble(
+  names = names(out$vars),
+  coefficient = exp(out$coef0),
+  pvalue = out$pv,
+  ci_lo = exp(out$ci[, 1]),
+  ci_hi = exp(out$ci[, 2])
+) %>%
+  arrange(pvalue) %>%
+  sable()
+```
+
+
+## LASSO - logistic - without grading scores
+
+Use LASSO logistic regression not based on previous gradings.
+
+```{r}
+# Set seed
+set.seed(141845)
+
+# Perform cross-validation
+# (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
+cv_fit <- cv.glmnet(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  family = "binomial",
+  alpha = 1,
+  nfolds = 10
+)
+
+# Extract the best lambda
+best_lambda_min <- cv_fit$lambda.min
+best_lambda_1se <- cv_fit$lambda.1se
+
+# Run glmnet
+gfit <- glmnet(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  family = "binomial",
+  alpha = 1,
+  intercept = TRUE,
+  standardize = TRUE
+)
+
+# Extract coef for a given lambda - avoid the intercept term
+# (given the small number of observations hence large SD, use min lambda)
+lambda <- best_lambda_min
+n <- nrow(y_without_gradings)
+beta <- coef(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  object = gfit,
+  s = lambda,
+  exact = TRUE
+)
+
+# Estimate sigma
+gsigmahat <- estimateSigma(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  intercept = TRUE,
+  standardize = TRUE
+)$sigmahat
+
+# Compute fixed lambda p-values and selection intervals
+out <- fixedLassoInf(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  beta = beta,
+  lambda = lambda,
+  # Level of significance
+  alpha = 0.1,
+  family = "binomial",
+  intercept = TRUE,
+  sigma = gsigmahat
+)
+
+# Prettify
+tibble(
+  names = names(out$vars),
+  odds_ratio = exp(out$coef0),
+  pvalue = out$pv,
+  ci_lo = exp(out$ci[, 1]),
+  ci_hi = exp(out$ci[, 2])
+) %>%
+  arrange(pvalue) %>%
+  sable()
+```
+
+
+## LASSO - logistic - with grading scores
+
+Use LASSO logistic regression based on previous gradings.
+
+```{r}
+# Set seed
+set.seed(141708)
+
+# Perform cross-validation
+# (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
+cv_fit <- cv.glmnet(
+  x = X_with_gradings_scaled,
+  y = y_without_gradings,
+  family = "binomial",
+  alpha = 1,
+  nfolds = 10
+)
+
+# Extract the best lambda
+best_lambda_min <- cv_fit$lambda.min
+best_lambda_1se <- cv_fit$lambda.1se
+
+# Run glmnet
+gfit <- glmnet(
+  x = X_with_gradings_scaled,
+  y = y_without_gradings,
+  family = "binomial",
+  alpha = 1,
+  lambda = c(best_lambda_min, best_lambda_1se),
+  intercept = TRUE,
+  standardize = TRUE
+)
+
+# Extract coef for a given lambda - avoid the intercept term
+# (given the small number of observations hence large SD, use min lambda)
+lambda <- best_lambda_min
+n <- nrow(y_without_gradings)
+beta <- coef(
+  x = X_with_gradings_scaled,
+  y = y_without_gradings,
+  object = gfit,
+  s = lambda,
+  exact = TRUE
+)
+
+# Estimate sigma
+gsigmahat <- estimateSigma(
+  x = X_with_gradings_scaled,
+  y = y_without_gradings,
+  intercept = TRUE,
+  standardize = TRUE
+)$sigmahat
+
+# Compute fixed lambda p-values and selection intervals
+out <- fixedLassoInf(
+  x = X_with_gradings_scaled,
+  y = y_without_gradings,
+  beta = beta,
+  lambda = lambda,
+  # Level of significance
+  alpha = 0.1,
+  family = "binomial",
+  intercept = TRUE,
+  sigma = gsigmahat
+)
+
+# Prettify
+tibble(
+  names = names(out$vars),
+  odds_ratio = exp(out$coef0),
+  pvalue = out$pv,
+  ci_lo = exp(out$ci[, 1]),
+  ci_hi = exp(out$ci[, 2])
+) %>%
+  arrange(pvalue) %>%
+  sable()
+```
+
+
+------------------------------------------------------------------------
+
+# Compute - Honest esitmation
+
+https://www.pnas.org/doi/full/10.1073/pnas.1510489113
+https://arxiv.org/pdf/1510.04342
+
+https://github.com/grf-labs/grf
+https://grf-labs.github.io/grf/REFERENCE.html
+https://cran.r-project.org/web/packages/hettx/vignettes/detect_idiosyncratic_vignette.html
+
+
+```{r}
+library(grf)
+```
+
+
+```{r}
+# Generate data.
+n <- 2000
+p <- 10
+X <- matrix(rnorm(n * p), n, p)
+X.test <- matrix(0, 101, p)
+X.test[, 1] <- seq(-2, 2, length.out = 101)
+
+# Train a causal forest.
+W <- rbinom(n, 1, 0.4 + 0.2 * (X[, 1] > 0))
+Y <- pmax(X[, 1], 0) * W + X[, 2] + pmin(X[, 3], 0) + rnorm(n)
+tau.forest <- causal_forest(X, Y, W)
+
+# Estimate treatment effects for the training data using out-of-bag prediction.
+tau.hat.oob <- predict(tau.forest)
+hist(tau.hat.oob$predictions)
+
+# Estimate treatment effects for the test sample.
+tau.hat <- predict(tau.forest, X.test)
+plot(X.test[, 1], tau.hat$predictions, ylim = range(tau.hat$predictions, 0, 2), xlab = "x", ylab = "tau", type = "l")
+lines(X.test[, 1], pmax(0, X.test[, 1]), col = 2, lty = 2)
+
+# Estimate the conditional average treatment effect on the full sample (CATE).
+average_treatment_effect(tau.forest, target.sample = "all")
+
+# Estimate the conditional average treatment effect on the treated sample (CATT).
+average_treatment_effect(tau.forest, target.sample = "treated")
+
+# Add confidence intervals for heterogeneous treatment effects; growing more trees is now recommended.
+tau.forest <- causal_forest(X, Y, W, num.trees = 4000)
+tau.hat <- predict(tau.forest, X.test, estimate.variance = TRUE)
+sigma.hat <- sqrt(tau.hat$variance.estimates)
+plot(X.test[, 1], tau.hat$predictions, ylim = range(tau.hat$predictions + 1.96 * sigma.hat, tau.hat$predictions - 1.96 * sigma.hat, 0, 2), xlab = "x", ylab = "tau", type = "l")
+lines(X.test[, 1], tau.hat$predictions + 1.96 * sigma.hat, col = 1, lty = 2)
+lines(X.test[, 1], tau.hat$predictions - 1.96 * sigma.hat, col = 1, lty = 2)
+lines(X.test[, 1], pmax(0, X.test[, 1]), col = 2, lty = 1)
+```
+
+
+------------------------------------------------------------------------
+
+# Write
+
+## Setup
+
+Create the necessary directories.
+
+```{r, results="hold"}
+# Get today's date
+today <- Sys.Date()
+today <- format(today, "%Y-%m-%d")
+
+# Create folder names
+base_folder <- file.path(DST_DIRNAME, ANALYSIS_NAME)
+date_folder <- file.path(base_folder, today)
+csv_folder <- file.path(date_folder, "csv")
+pdf_folder <- file.path(date_folder, "pdf")
+html_folder <- file.path(date_folder, "html")
+
+# Create folders
+suppressWarnings(dir.create(base_folder))
+suppressWarnings(dir.create(date_folder))
+suppressWarnings(dir.create(csv_folder))
+suppressWarnings(dir.create(pdf_folder))
+suppressWarnings(dir.create(html_folder))
+
+# Print folder names
+print(base_folder)
+print(date_folder)
+print(csv_folder)
+print(pdf_folder)
+print(html_folder)
+```
+
+
+## Figures
+
+Write all figures.
+
+```{r}
+# Save
+# ggsave(
+#   file.path(pdf_folder, "histogram_num_days.pdf"),
+#   plot = plots$histogram_num_days,
+#   width = 6,
+#   height = 6
+# )
+```
+
+```{r}
+# # Start graphic device
+# pdf(
+#   file = file.path(pdf_folder, "forest-plot_frequentist.pdf"),
+#   width = 10,
+#   height = 15
+# )
+#
+# # Plot
+# plots$forest_plot_frequentist
+#
+# # Shut down device
+# dev.off()
+```
+
+
+## Tables
+
+Write all tables.
+
+```{r}
+# # Arguments
+# df <- tables$desc_stats_cohorts_cv_prolaio
+# filepath_csv <- file.path(csv_folder, "desc-stats_by-cohort_cov.csv")
+# filepath_html <- file.path(html_folder, "desc-stats_by-cohort_cov.html")
+#
+# # Save as CSV
+# write_csv(
+#   x = df,
+#   file = filepath_csv
+# )
+#
+# # Save as HTML
+# # - Save pdf does not work with webshot
+# # - It works with pagedown but not as pretty as desired
+# df %>%
+#   sable() %>%
+#   kableExtra::save_kable(file = filepath_html)
+```
+
+```{r}
+write_csv(
+  univariable_unadjusted,
+  file.path(csv_folder, "univariable_unadjusted.csv")
+)
+```
+
+```{r}
+write_csv(
+  univariable_adjusted,
+  file.path(csv_folder, "univariable_adjusted.csv")
+)
+```
+
+```{r}
+write_csv(
+  multivariable_pvalue,
+  file.path(csv_folder, "multivariable_pvalue.csv")
+)
+```
+
+
+## Data
+
+Write all data.
+
+```{r}
+# # Arguments
+# df <- study
+# filename <- paste0(ANALYSIS_NAME, "_", today, ".csv")
+# filepath_csv <- file.path(DST_BUCKET, dst_dirname_data, filename)
+#
+# # Save as CSV
+# write_csv(
+#   x = df,
+#   file = filepath_csv
+# )
+```
+
+
+------------------------------------------------------------------------
+
+# Reproducibility
+
+## Linting and styling
+
+```{r, echo=FALSE, results="hide"}
+# Style current file
+styler::style_file(
+  path = rstudioapi::getSourceEditorContext()$path,
+  style = styler::tidyverse_style
+)
+
+# Lint current file
+lintr::lint(rstudioapi::getSourceEditorContext()$path)
+```
+
+
+## Dependency management
+
+```{r, results="hide"}
+# Clean up project of libraries not in use
+# (use prompt = FALSE to avoid the interactive session)
+# (packages can only be removed in interactive mode b/c this is destructive)
+renv::clean(prompt = TRUE)
+
+# Update lock file with new packages
+renv::snapshot()
+```
+
+
+## Containerization
+
+```{r}
+# Only run this if option is set to TRUE
+if (UPDATE_DOCKERFILE) {
+  # Create a dockerfile from the session info
+  my_dockerfile <- containerit::dockerfile(from = sessionInfo(), env = ls())
+  # Write file
+  write(my_dockerfile, file = "~/Dockerfile")
+  # Print
+  print(my_dockerfile)
+}
+```
+
+
+------------------------------------------------------------------------
+
+# Documentation {.tabset}
+
+## Session Info
+
+```{r session_info, echo=FALSE}
+print(sessionInfo(), locale = FALSE)
+```
+
+## References
+
+```{r refs, echo=FALSE}
+(.packages()) %>%
+  sort() %>%
+  lapply(citation) %>%
+  lapply(c) %>%
+  unique()
+```
