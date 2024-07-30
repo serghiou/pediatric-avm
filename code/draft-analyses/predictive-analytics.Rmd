@@ -1,14 +1,45 @@
 ---
-title: 'Predictive analytics: Poor outcomes'
+title: 'Predictive analytics: `r params$TITLE`'
 author: "Stylianos Serghiou"
 date: '`r format(Sys.time(), "%d/%m/%Y")`'
 params:
-  PROPORTION_OF_DATA: 1
+  PROPORTION_OF_DATA:
+    label: "Proportion of data to use"
+    value: 1
+    input: slider
+    min: 0
+    max: 1
+    step: 0.05
+    sep: ""
+  CONFIG: 
+    label: "Config file name"
+    value: "config_poor-outcomes.R"
+    input: select
+    choices: [
+      "config_is-poor-outcome.R",
+      "config_is-poor-outcome_haemTRUE.R",
+      "config_is-poor-outcome_haemFALSE.R",
+      "config_has-complication-major.R",
+      "config_has-complication-minor.R",
+      "config_is-obliterated.R"
+    ]
+  TITLE:
+    label: "Outcome title"
+    value: "Poor outcomes"
+    input: select
+    choices: [
+      "Poor outcome",
+      "Poor outcome - Hemorrhage",
+      "Poor outcome - No Hemorrhage",
+      "Complications - Major",
+      "Complications - Minor",
+      "Obliterated"
+    ]
 output:
   rmdformats::readthedown:
     highlight: kate
     df_print: kable    # obviates %>% kable; does not replace styling though
-    code_folding: hide # or: show; (comment out to not give option)
+    code_folding: show # [hide, show] (comment out to not give option)
   pdf_document:
     highlight: tango
     df_print: kable
@@ -253,20 +284,15 @@ library(tidyverse)
 ## Configurations
 
 ```{r}
-# Source locations
-SRC_DIRNAME <- "../../data/3_tidy/patients"
-SRC_BASENAME <- "patients-daily_2024-07-21.csv"
+# Source outcome-specific configs
+source(params$CONFIG)
 
 # Destination locations
 DST_DIRNAME <- paste0("../../outputs/")
 
-# Analysis name
-ANALYSIS_NAME <- "predictive-analytics/poor-outcomes"
-
-# Outcome of choice
-CHOSEN_OUTCOME <- "is_poor_outcome"
-CHOSEN_OUTCOME_LEVELS <- c(FALSE, TRUE)
-CHOSEN_OUTCOME_LABELS <- c("Good outcome", "Poor outcome")
+# Source locations
+SRC_DIRNAME <- "../../data/3_tidy/patients"
+SRC_BASENAME <- "patients-daily_2024-07-21.csv"
 
 # Should the Dockerfile be automatically updated?
 UPDATE_DOCKERFILE <- FALSE
@@ -300,7 +326,9 @@ EXPOSURES_BINARY <- c(
   "Seizures at presentation" = "has_seizures",
   "Deficit at presentation" = "has_deficit",
   "Paresis at presentation" = "has_paresis",
-  "Presence of aneurysms" = "has_associated_aneurysm"
+  "Presence of aneurysms" = "has_associated_aneurysm",
+  "Spetzler-Martin grade < 4" = "is_spetzler_martin_grade_less_than_4",
+  "Had surgery" = "is_surgery"
 )
 
 EXPOSURES_CATEGORICAL <- c(
@@ -360,6 +388,14 @@ filepath <- file.path(SRC_DIRNAME, SRC_BASENAME)
 patients_ <-
   read_csv(filepath) %>%
   dplyr::sample_frac(params$PROPORTION_OF_DATA)
+
+# If analyzing a subset of the data, restrict the dataset
+if (params$TITLE == "Poor outcome - Hemorrhage") {
+  patients_ <- patients_ %>% filter(has_hemorrhage)
+}
+if (params$TITLE == "Poor outcome - No Hemorrhage") {
+  patients_ <- patients_ %>% filter(!has_hemorrhage)
+}
 ```
 
 
@@ -417,6 +453,24 @@ df_multi <-
 ```
 
 
+For `procedure_combinations`, indicate if surgery-based or not.
+
+```{r}
+df_multi <-
+  df_multi %>%
+  mutate(
+    is_surgery = str_detect(procedure_combinations, "S")
+  ) %>%
+  relocate(is_surgery, .after = procedure_combinations)
+
+df_uni <-
+  df_uni %>%
+  mutate(
+    is_surgery = str_detect(procedure_combinations, "S")
+  ) %>%
+  relocate(is_surgery, .after = procedure_combinations)
+```
+
 For `location`, reduce choices (use "Other").
 
 ```{r}
@@ -429,6 +483,27 @@ df_multi <-
     location = factor(location),
     location = relevel(location, ref = "Other")
   )
+```
+
+
+For `spetzler_martin_grade`, create a binary variant of 1-3 vs. 4-5.
+
+```{r}
+# For multivariable analysis
+df_multi <-
+  df_multi %>%
+  mutate(
+    is_spetzler_martin_grade_less_than_4 = spetzler_martin_grade < 4
+  ) %>%
+  relocate(is_spetzler_martin_grade_less_than_4, .after = spetzler_martin_grade)
+
+# For univariable analysis
+df_uni <-
+  df_uni %>%
+  mutate(
+    is_spetzler_martin_grade_less_than_4 = spetzler_martin_grade < 4
+  ) %>%
+  relocate(is_spetzler_martin_grade_less_than_4, .after = spetzler_martin_grade)
 ```
 
 
@@ -475,7 +550,7 @@ df_multi %>%
 
 ------------------------------------------------------------------------
 
-# Compute - Visualizations
+# Visualizations
 
 ## Overall
 
@@ -559,23 +634,232 @@ df_long %>%
 
 ------------------------------------------------------------------------
 
-# Compute - Descriptive statistics
+# Descriptive statistics
+
+## Setup
+
+Descriptive statistics - continuous variables.
+
+```{r}
+compute_descriptive_continuous <- function(
+    df = df_uni,
+    cols = c(EXPOSURES_CONTINUOUS),
+    use_interaction = TRUE,
+    interaction_col = "has_hemorrhage",
+    interaction_col_name = "Hemorrhage at presentation",
+    interaction_col_value = TRUE,
+    prefix = "Haem") {
+  # Apply desired formatting to numbers
+  format_numbers <- function(x) {
+    sprintf("%.1f", x)
+  }
+
+  # Compute new dataset
+  df <-
+    df %>%
+    select(cols, CHOSEN_OUTCOME, interaction_col) %>%
+    drop_na(CHOSEN_OUTCOME, interaction_col)
+
+  # Apply interaction
+  if (use_interaction) {
+    df <-
+      df %>%
+      filter(!!sym(interaction_col) == interaction_col_value)
+  }
+
+  # Compute descriptive statistics
+  desc_stats <-
+    df %>%
+    pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+    group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
+    summarize(
+      num_total = n(),
+      num_missing = sum(is.na(values)),
+      mean = mean(values, na.rm = TRUE),
+      sd = sd(values, na.rm = TRUE),
+      min = quantile(values, 0, na.rm = TRUE),
+      max = quantile(values, 1, na.rm = TRUE),
+      q_50 = quantile(values, 0.50, na.rm = TRUE),
+      q_25 = quantile(values, 0.25, na.rm = TRUE),
+      q_75 = quantile(values, 0.75, na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      stats = glue::glue("{format_numbers(mean)} ({format_numbers(sd)})"),
+      !!sym(CHOSEN_OUTCOME) := factor(
+        !!sym(CHOSEN_OUTCOME),
+        levels = CHOSEN_OUTCOME_LEVELS,
+        labels = CHOSEN_OUTCOME_LABELS
+      )
+    ) %>%
+    pivot_wider(
+      id_cols = keys,
+      names_from = !!sym(CHOSEN_OUTCOME),
+      values_from = stats
+    ) %>%
+    relocate(CHOSEN_OUTCOME_LABELS[2], .after = CHOSEN_OUTCOME_LABELS[1])
+
+  # Compute p-values
+  pvals <-
+    df %>%
+    pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+    group_by(keys) %>%
+    summarize(
+      pvalue = wilcox.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
+    )
+
+  # Synthesize
+  out <-
+    desc_stats %>%
+    left_join(pvals)
+
+  # Add sample size to column names
+  num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
+  num_no_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
+
+  new_col_names <- c(
+    glue::glue("{prefix} - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
+    glue::glue("{prefix} - {CHOSEN_OUTCOME_LABELS[1]} (n={num_no_outcome})"),
+    glue::glue("{prefix} - P-value")
+  )
+
+  out <-
+    out %>%
+    rename_with(
+      .cols = !!sym(CHOSEN_OUTCOME_LABELS[1]):pvalue, ~new_col_names
+    ) %>%
+    mutate(
+      keys = ifelse(keys == interaction_col, interaction_col_name, keys)
+    )
+
+  return(out)
+}
+```
+
+
+Descriptive statistics - binary variables.
+
+```{r}
+compute_descriptive_binary <- function(
+    df = df_uni,
+    cols = c(EXPOSURES_BINARY),
+    use_interaction = TRUE,
+    interaction_col = "has_hemorrhage",
+    interaction_col_name = "Hemorrhage at presentation",
+    interaction_col_value = TRUE,
+    prefix = "Haem") {
+  # Define arguments
+  cols <- c(cols[!cols == interaction_col])
+
+  # Apply desired formatting to numbers
+  format_numbers <- function(x, decimals = 0) {
+    decimals <- paste0("%.", decimals, "f")
+    sprintf(decimals, x)
+  }
+
+  # Compute new dataset
+  df <-
+    df %>%
+    select(all_of(cols), CHOSEN_OUTCOME, interaction_col) %>%
+    drop_na(CHOSEN_OUTCOME, interaction_col)
+
+  # Apply interaction
+  if (use_interaction) {
+    df <-
+      df %>%
+      filter(!!sym(interaction_col) == interaction_col_value)
+  }
+
+  # Compute descriptive statistics
+  desc_stats <-
+    df %>%
+    pivot_longer(
+      cols = -c(CHOSEN_OUTCOME),
+      names_to = "keys",
+      values_to = "values"
+    ) %>%
+    group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
+    summarize(
+      num_total = n(),
+      num_missing = sum(is.na(values)),
+      num_with = sum(values, na.rm = TRUE),
+      num_without = sum(!values, na.rm = TRUE),
+      pct_with = mean(values, na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      stats = glue::glue("{num_with} ({format_numbers(pct_with*100)}%)"),
+      !!sym(CHOSEN_OUTCOME) := factor(
+        !!sym(CHOSEN_OUTCOME),
+        levels = CHOSEN_OUTCOME_LEVELS,
+        labels = CHOSEN_OUTCOME_LABELS
+      )
+    ) %>%
+    pivot_wider(
+      id_cols = keys,
+      names_from = !!sym(CHOSEN_OUTCOME),
+      values_from = stats
+    ) %>%
+    relocate(CHOSEN_OUTCOME_LABELS[1], .after = CHOSEN_OUTCOME_LABELS[2])
+
+  # Compute p-values
+  pvals <-
+    df %>%
+    pivot_longer(
+      cols = -c(CHOSEN_OUTCOME),
+      names_to = "keys",
+      values_to = "values"
+    ) %>%
+    group_by(keys) %>%
+    summarize(
+      pvalue = kruskal.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
+    )
+
+  # Synthesize
+  out <-
+    desc_stats %>%
+    left_join(pvals)
+
+  # Prettify
+  num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
+  num_no_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
+
+  new_col_names <- c(
+    glue::glue("{prefix} - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
+    glue::glue("{prefix} - {CHOSEN_OUTCOME_LABELS[1]} (n={num_no_outcome})"),
+    glue::glue("{prefix} - P-value")
+  )
+
+  out <-
+    out %>%
+    rename_with(
+      .cols = !!sym(CHOSEN_OUTCOME_LABELS[2]):pvalue, ~new_col_names
+    ) %>%
+    mutate(
+      keys = ifelse(keys == interaction_col, interaction_col_name, keys)
+    )
+
+  return(out)
+}
+```
+
+
 
 ## Non-specific
 
 ```{r}
 # Rename dataframe
 `Pediatric AVMs` <-
-  patients %>%
+  df_uni %>%
   filter(is_eligible) %>%
-  select(-is_eligible)
+  select(-is_eligible, -comments)
 
 # Create summary
 `Pediatric AVMs` %>%
   summarytools::dfSummary(display.labels = FALSE) %>%
   print(
     file =
-      "../../outputs/descriptive-statistics/descriptive_statistics_after.html",
+      "../../outputs/descriptive-statistics/descriptive_statistics_eligible.html",
     footnote = NA
   )
 
@@ -584,9 +868,11 @@ remove(`Pediatric AVMs`)
 ```
 
 
-## Using table1
+## By hemorrhage - table1 (WIP)
 
-```{r}
+https://cran.r-project.org/web/packages/table1/vignettes/table1-examples.html
+
+```{r eval=FALSE}
 library(table1)
 
 table1::table1(
@@ -595,7 +881,7 @@ table1::table1(
 )
 ```
 
-```{r}
+```{r eval=FALSE}
 # Initialize values
 df <- df_uni
 
@@ -655,611 +941,89 @@ compute_pvalues <- function(x, ...) {
 
 # Create the descriptive table
 frla <- as.formula(paste("~ . | has_hemorrhage *", CHOSEN_OUTCOME))
-a <- table1(frla,
-  data = df[, unname(cols)],
-  render.continuous = render_continuous,
-  overall = c(left = "Overall"),
-  topclass = "Rtable1-zebra"
-)
+
+# Create table
+table1_descriptive_statistics <-
+  table1(frla,
+    data = df[, unname(cols)],
+    render.continuous = render_continuous,
+    overall = c(left = "Overall"),
+    topclass = "Rtable1-zebra"
+  )
+
+# Print
+table1_descriptive_statistics
 ```
 
 
-## Overall
-
-Continuous.
+## By hemorrhage
 
 ```{r}
 # Define arguments
-df <- df_uni
-cols <- c(EXPOSURES_CONTINUOUS)
+interaction_col <- "has_hemorrhage"
+interaction_col_name <- "Hemorrhage at presentation"
+prefix_true <- "Haem"
+prefix_false <- "No Haem"
 
-# Apply desired formatting to numbers
-format_numbers <- function(x) {
-  sprintf("%.1f", x)
-}
-
-# Compute new dataset
-df <-
-  df %>%
-  select(all_of(cols), CHOSEN_OUTCOME, has_hemorrhage) %>%
-  drop_na(CHOSEN_OUTCOME, has_hemorrhage)
-
-# Compute descriptive statistics
-desc_stats <-
-  df %>%
-  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
-  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
-  summarize(
-    num_total = n(),
-    num_missing = sum(is.na(values)),
-    mean = mean(values, na.rm = TRUE),
-    sd = sd(values, na.rm = TRUE),
-    min = quantile(values, 0, na.rm = TRUE),
-    max = quantile(values, 1, na.rm = TRUE),
-    q_50 = quantile(values, 0.50, na.rm = TRUE),
-    q_25 = quantile(values, 0.25, na.rm = TRUE),
-    q_75 = quantile(values, 0.75, na.rm = TRUE)
-  ) %>%
-  ungroup() %>%
-  mutate(
-    stats = glue::glue("{format_numbers(mean)} ({format_numbers(sd)})"),
-    !!sym(CHOSEN_OUTCOME) := factor(
-      !!sym(CHOSEN_OUTCOME),
-      levels = CHOSEN_OUTCOME_LEVELS,
-      labels = CHOSEN_OUTCOME_LABELS
-    )
-  ) %>%
-  pivot_wider(
-    id_cols = keys,
-    names_from = CHOSEN_OUTCOME,
-    values_from = stats
-  ) %>%
-  relocate(CHOSEN_OUTCOME_LABELS[1], .after = CHOSEN_OUTCOME_LABELS[2])
-
-# Compute p-values
-pvals <-
-  df %>%
-  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
-  group_by(keys) %>%
-  summarize(
-    pvalue = wilcox.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
-  )
-
-# Synthesize
-out <-
-  desc_stats %>%
-  left_join(pvals)
-
-# Prettify
-num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
-num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
-
-new_col_names <- c(
-  glue::glue("All - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
-  glue::glue("All - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
-  glue::glue("All - P-value")
+# Get all
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
 )
-
-out <-
-  out %>%
-  rename_with(.cols = !!sym(CHOSEN_OUTCOME_LABELS[2]):pvalue, ~new_col_names)
-
-# Print
-out_all_continuous <- out
-sable(out_all_continuous)
-```
-
-
-Binary.
-
-```{r}
-# Define arguments
-df <- df_uni
-cols <- c(EXPOSURES_BINARY[!EXPOSURES_BINARY == "has_hemorrhage"])
-
-# Apply desired formatting to numbers
-format_numbers <- function(x, decimals = 0) {
-  decimals <- paste0("%.", decimals, "f")
-  sprintf(decimals, x)
-}
-
-# Compute new dataset
-df <-
-  df %>%
-  select(all_of(cols), CHOSEN_OUTCOME, has_hemorrhage) %>%
-  drop_na(CHOSEN_OUTCOME, has_hemorrhage)
-
-# Compute descriptive statistics
-desc_stats <-
-  df %>%
-  pivot_longer(
-    cols = -c(CHOSEN_OUTCOME),
-    names_to = "keys",
-    values_to = "values"
-  ) %>%
-  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
-  summarize(
-    num_total = n(),
-    num_missing = sum(is.na(values)),
-    num_with = sum(values, na.rm = TRUE),
-    num_without = sum(!values, na.rm = TRUE),
-    pct_with = mean(values, na.rm = TRUE)
-  ) %>%
-  ungroup() %>%
-  mutate(
-    stats = glue::glue("{num_with} ({format_numbers(pct_with*100)}%)"),
-    !!sym(CHOSEN_OUTCOME) := factor(
-      !!sym(CHOSEN_OUTCOME),
-      levels = CHOSEN_OUTCOME_LEVELS,
-      labels = CHOSEN_OUTCOME_LABELS
-    )
-  ) %>%
-  pivot_wider(
-    id_cols = keys,
-    names_from = CHOSEN_OUTCOME,
-    values_from = stats
-  ) %>%
-  relocate(CHOSEN_OUTCOME_LABELS[1], .after = CHOSEN_OUTCOME_LABELS[2])
-
-# Compute p-values
-pvals <-
-  df %>%
-  pivot_longer(
-    cols = -c(CHOSEN_OUTCOME),
-    names_to = "keys",
-    values_to = "values"
-  ) %>%
-  group_by(keys) %>%
-  summarize(
-    pvalue = kruskal.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
-  )
-
-# Synthesize
-out <-
-  desc_stats %>%
-  left_join(pvals)
-
-# Prettify
-num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
-num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
-
-new_col_names <- c(
-  glue::glue("All - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
-  glue::glue("All - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
-  glue::glue("All - P-value")
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
 )
+out_all <- bind_rows(out)
 
-out <-
-  out %>%
-  rename_with(
-    .cols = !!sym(CHOSEN_OUTCOME_LABELS[2]):pvalue, ~new_col_names
-  ) %>%
-  mutate(
-    keys =
-      ifelse(keys == "has_hemorrhage", "Hemorrhage at presentation", keys)
-  )
-
-# Print
-out_all_binary <- out
-sable(out_all_binary)
-```
-
-Synthesize
-
-```{r}
-out_all <- bind_rows(out_all_continuous, out_all_binary)
-out_all %>% sable()
-```
-
-
-## With hemorrhage
-
-Continuous.
-
-```{r}
-# Define arguments
-df <- df_uni
-cols <- c(EXPOSURES_CONTINUOUS)
-
-# Apply desired formatting to numbers
-format_numbers <- function(x) {
-  sprintf("%.1f", x)
-}
-
-# Compute new dataset
-df <-
-  df %>%
-  select(cols, CHOSEN_OUTCOME, has_hemorrhage) %>%
-  drop_na(CHOSEN_OUTCOME, has_hemorrhage) %>%
-  filter(has_hemorrhage)
-
-# Compute descriptive statistics
-desc_stats <-
-  df %>%
-  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
-  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
-  summarize(
-    num_total = n(),
-    num_missing = sum(is.na(values)),
-    mean = mean(values, na.rm = TRUE),
-    sd = sd(values, na.rm = TRUE),
-    min = quantile(values, 0, na.rm = TRUE),
-    max = quantile(values, 1, na.rm = TRUE),
-    q_50 = quantile(values, 0.50, na.rm = TRUE),
-    q_25 = quantile(values, 0.25, na.rm = TRUE),
-    q_75 = quantile(values, 0.75, na.rm = TRUE)
-  ) %>%
-  ungroup() %>%
-  mutate(
-    stats = glue::glue("{format_numbers(mean)} ({format_numbers(sd)})"),
-    !!sym(CHOSEN_OUTCOME) := factor(
-      !!sym(CHOSEN_OUTCOME),
-      levels = CHOSEN_OUTCOME_LEVELS,
-      labels = CHOSEN_OUTCOME_LABELS
-    )
-  ) %>%
-  pivot_wider(
-    id_cols = keys,
-    names_from = !!sym(CHOSEN_OUTCOME),
-    values_from = stats
-  ) %>%
-  relocate(CHOSEN_OUTCOME_LABELS[2], .after = CHOSEN_OUTCOME_LABELS[1])
-
-# Compute p-values
-pvals <-
-  df %>%
-  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
-  group_by(keys) %>%
-  summarize(
-    pvalue = wilcox.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
-  )
-
-# Synthesize
-out <-
-  desc_stats %>%
-  left_join(pvals)
-
-# Prettify
-num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
-num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
-
-new_col_names <- c(
-  glue::glue("Haem - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
-  glue::glue("Haem - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
-  glue::glue("Haem - P-value")
+# Get with hemorrhage
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = prefix_true
 )
-
-out <-
-  out %>%
-  rename_with(
-    .cols = !!sym(CHOSEN_OUTCOME_LABELS[1]):pvalue, ~new_col_names
-  ) %>%
-  mutate(
-    keys = ifelse(keys == "has_hemorrhage", "Hemorrhage at presentation", keys)
-  )
-
-# Print
-out_with_hemorrhage_continuous <- out
-sable(out_with_hemorrhage_continuous)
-```
-
-
-Binary.
-
-```{r}
-# Define arguments
-df <- df_uni
-cols <- c(EXPOSURES_BINARY[!EXPOSURES_BINARY == "has_hemorrhage"])
-
-# Apply desired formatting to numbers
-format_numbers <- function(x, decimals = 0) {
-  decimals <- paste0("%.", decimals, "f")
-  sprintf(decimals, x)
-}
-
-# Compute new dataset
-df <-
-  df %>%
-  select(all_of(cols), CHOSEN_OUTCOME, has_hemorrhage) %>%
-  drop_na(CHOSEN_OUTCOME, has_hemorrhage) %>%
-  filter(has_hemorrhage)
-
-# Compute descriptive statistics
-desc_stats <-
-  df %>%
-  pivot_longer(
-    cols = -c(CHOSEN_OUTCOME),
-    names_to = "keys",
-    values_to = "values"
-  ) %>%
-  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
-  summarize(
-    num_total = n(),
-    num_missing = sum(is.na(values)),
-    num_with = sum(values, na.rm = TRUE),
-    num_without = sum(!values, na.rm = TRUE),
-    pct_with = mean(values, na.rm = TRUE)
-  ) %>%
-  ungroup() %>%
-  mutate(
-    stats = glue::glue("{num_with} ({format_numbers(pct_with*100)}%)"),
-    !!sym(CHOSEN_OUTCOME) := factor(
-      !!sym(CHOSEN_OUTCOME),
-      levels = CHOSEN_OUTCOME_LEVELS,
-      labels = CHOSEN_OUTCOME_LABELS
-    )
-  ) %>%
-  pivot_wider(
-    id_cols = keys,
-    names_from = !!sym(CHOSEN_OUTCOME),
-    values_from = stats
-  ) %>%
-  relocate(CHOSEN_OUTCOME_LABELS[1], .after = CHOSEN_OUTCOME_LABELS[2])
-
-# Compute p-values
-pvals <-
-  df %>%
-  pivot_longer(
-    cols = -c(CHOSEN_OUTCOME),
-    names_to = "keys",
-    values_to = "values"
-  ) %>%
-  group_by(keys) %>%
-  summarize(
-    pvalue = kruskal.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
-  )
-
-# Synthesize
-out <-
-  desc_stats %>%
-  left_join(pvals)
-
-# Prettify
-num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
-num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
-
-new_col_names <- c(
-  glue::glue("Haem - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
-  glue::glue("Haem - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
-  glue::glue("Haem - P-value")
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = prefix_true
 )
+out_haem <- bind_rows(out)
 
-out <-
-  out %>%
-  rename_with(
-    .cols = !!sym(CHOSEN_OUTCOME_LABELS[2]):pvalue, ~new_col_names
-  ) %>%
-  mutate(
-    keys = ifelse(keys == "has_hemorrhage", "Hemorrhage at presentation", keys)
-  )
-
-# Print
-out_with_hemorrhage_binary <- out
-sable(out_with_hemorrhage_binary)
-```
-
-
-Synthesize.
-
-```{r}
-# Synthesize
-out_with_hemorrhage <-
-  out_with_hemorrhage_continuous %>%
-  bind_rows(out_with_hemorrhage_binary)
-
-# Print
-sable(out_with_hemorrhage)
-```
-
-
-## Without hemorrhage
-
-Compute statistics within those with no hemorrhage.
-
-```{r}
-# Define arguments
-df <- df_uni
-cols <- c(EXPOSURES_CONTINUOUS)
-
-# Apply desired formatting to numbers
-format_numbers <- function(x) {
-  sprintf("%.1f", x)
-}
-
-# Compute new dataset
-df <-
-  df %>%
-  select(all_of(cols), CHOSEN_OUTCOME, has_hemorrhage) %>%
-  drop_na(CHOSEN_OUTCOME, has_hemorrhage) %>%
-  filter(!has_hemorrhage)
-
-# Compute descriptive statistics
-desc_stats <-
-  df %>%
-  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
-  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
-  summarize(
-    num_total = n(),
-    num_missing = sum(is.na(values)),
-    mean = mean(values, na.rm = TRUE),
-    sd = sd(values, na.rm = TRUE),
-    min = quantile(values, 0, na.rm = TRUE),
-    max = quantile(values, 1, na.rm = TRUE),
-    q_50 = quantile(values, 0.50, na.rm = TRUE),
-    q_25 = quantile(values, 0.25, na.rm = TRUE),
-    q_75 = quantile(values, 0.75, na.rm = TRUE)
-  ) %>%
-  ungroup() %>%
-  mutate(
-    stats = glue::glue("{format_numbers(mean)} ({format_numbers(sd)})"),
-    !!sym(CHOSEN_OUTCOME) := factor(
-      !!sym(CHOSEN_OUTCOME),
-      levels = CHOSEN_OUTCOME_LEVELS,
-      labels = CHOSEN_OUTCOME_LABELS
-    )
-  ) %>%
-  pivot_wider(
-    id_cols = keys,
-    names_from = !!sym(CHOSEN_OUTCOME),
-    values_from = stats
-  ) %>%
-  relocate(CHOSEN_OUTCOME_LABELS[2], .after = CHOSEN_OUTCOME_LABELS[1])
-
-# Compute p-values
-pvals <-
-  df %>%
-  pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
-  group_by(keys) %>%
-  summarize(
-    pvalue = wilcox.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
-  )
-
-# Synthesize
-out <-
-  desc_stats %>%
-  left_join(pvals)
-
-# Prettify
-num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
-num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
-
-new_col_names <- c(
-  glue::glue("No haem - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
-  glue::glue("No haem - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
-  glue::glue("No haem - P-value")
+# Get without hemorrhage
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = F,
+  prefix = prefix_false
 )
-
-out <-
-  out %>%
-  rename_with(
-    .cols = !!sym(CHOSEN_OUTCOME_LABELS[1]):pvalue, ~new_col_names
-  ) %>%
-  mutate(
-    keys = ifelse(keys == "has_hemorrhage", "Hemorrhage at presentation", keys)
-  )
-
-# Print
-out_without_hemorrhage_continuous <- out
-sable(out_without_hemorrhage_continuous)
-```
-
-
-Binary.
-
-```{r}
-# Define arguments
-df <- df_uni
-cols <- c(EXPOSURES_BINARY[!EXPOSURES_BINARY == "has_hemorrhage"])
-
-# Apply desired formatting to numbers
-format_numbers <- function(x, decimals = 0) {
-  decimals <- paste0("%.", decimals, "f")
-  sprintf(decimals, x)
-}
-
-# Compute new dataset
-df <-
-  df %>%
-  select(all_of(cols), CHOSEN_OUTCOME, has_hemorrhage) %>%
-  drop_na(CHOSEN_OUTCOME, has_hemorrhage) %>%
-  filter(!has_hemorrhage)
-
-# Compute descriptive statistics
-desc_stats <-
-  df %>%
-  pivot_longer(
-    cols = -c(CHOSEN_OUTCOME),
-    names_to = "keys",
-    values_to = "values"
-  ) %>%
-  group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
-  summarize(
-    num_total = n(),
-    num_missing = sum(is.na(values)),
-    num_with = sum(values, na.rm = TRUE),
-    num_without = sum(!values, na.rm = TRUE),
-    pct_with = mean(values, na.rm = TRUE)
-  ) %>%
-  ungroup() %>%
-  mutate(
-    stats = glue::glue("{num_with} ({format_numbers(pct_with*100)}%)"),
-    !!sym(CHOSEN_OUTCOME) := factor(
-      !!sym(CHOSEN_OUTCOME),
-      levels = CHOSEN_OUTCOME_LEVELS,
-      labels = CHOSEN_OUTCOME_LABELS
-    )
-  ) %>%
-  pivot_wider(
-    id_cols = keys,
-    names_from = !!sym(CHOSEN_OUTCOME),
-    values_from = stats
-  ) %>%
-  relocate(CHOSEN_OUTCOME_LABELS[1], .after = CHOSEN_OUTCOME_LABELS[2])
-
-# Compute p-values
-pvals <-
-  df %>%
-  pivot_longer(
-    cols = -c(CHOSEN_OUTCOME),
-    names_to = "keys",
-    values_to = "values"
-  ) %>%
-  group_by(keys) %>%
-  summarize(
-    pvalue = kruskal.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
-  )
-
-# Synthesize
-out <-
-  desc_stats %>%
-  left_join(pvals)
-
-# Prettify
-num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
-num_without_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
-
-new_col_names <- c(
-  glue::glue("No haem - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
-  glue::glue("No haem - {CHOSEN_OUTCOME_LABELS[1]} (n={num_without_outcome})"),
-  glue::glue("No haem - P-value")
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = F,
+  prefix = prefix_false
 )
+out_no_haem <- bind_rows(out)
 
-out <-
-  out %>%
-  rename_with(
-    .cols = !!sym(CHOSEN_OUTCOME_LABELS[2]):pvalue, ~new_col_names
-  ) %>%
-  mutate(
-    keys = ifelse(keys == "has_hemorrhage", "Hemorrhage at presentation", keys)
-  )
-
-# Print
-out_without_hemorrhage_binary <- out
-sable(out_without_hemorrhage_binary)
-```
-
-
-Synthesize.
-
-```{r}
-# Synthesize
-out_without_hemorrhage <-
-  out_without_hemorrhage_continuous %>%
-  bind_rows(out_without_hemorrhage_binary)
-
-# Print
-sable(out_without_hemorrhage)
-```
-
-
-## Synthesize all
-
-```{r}
 # Synthesize
 out_complete <-
   out_all %>%
-  left_join(out_with_hemorrhage, by = "keys") %>%
-  left_join(out_without_hemorrhage, by = "keys") %>%
+  left_join(out_haem, by = "keys") %>%
+  left_join(out_no_haem, by = "keys") %>%
   arrange(`All - P-value`)
 
 # Print
@@ -1268,9 +1032,84 @@ out_complete %>%
 ```
 
 
+## By diffuse nidus
+
+```{r}
+# Define arguments
+interaction_col <- "is_diffuse_nidus"
+interaction_col_name <- "Is diffuse nidus"
+prefix_true <- "Diffuse"
+prefix_false <- "Not Diffuse"
+
+# Get all
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out_all <- bind_rows(out)
+
+# Get with hemorrhage
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = prefix_true
+)
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = prefix_true
+)
+out_haem <- bind_rows(out)
+
+# Get without hemorrhage
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = F,
+  prefix = prefix_false
+)
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = F,
+  prefix = prefix_false
+)
+out_no_haem <- bind_rows(out)
+
+# Synthesize
+out_complete <-
+  out_all %>%
+  left_join(out_haem, by = "keys") %>%
+  left_join(out_no_haem, by = "keys") %>%
+  arrange(`All - P-value`)
+
+# Print
+out_complete %>%
+  sable()
+```
+
 ------------------------------------------------------------------------
 
-# Compute - Associations
+# Associations
 
 Correlation matrix.
 
@@ -1313,7 +1152,7 @@ ggcorrplot::ggcorrplot(
 
 ------------------------------------------------------------------------
 
-# Compute - Univariable
+# Univariable statistics
 
 ## Setup
 
@@ -1669,7 +1508,7 @@ univariable_adjusted_recoded %>%
 
 ------------------------------------------------------------------------
 
-# Compute - Uni - Interaction
+# Interaction analysis
 
 ## Adjusted - Recoded
 
@@ -1866,31 +1705,42 @@ df %>%
 
 ------------------------------------------------------------------------
 
-# Compute - Multivariable - Without grading scores
+# Selective inference
+
+Read the following guides:
+- [How to use glmnet](https://glmnet.stanford.edu/articles/glmnet.html)
+- [Selective inference using forward selection](https://stephens999.github.io/misc/selective_inference_toy.html)
 
 ## Setup
 
+Define unwanted columns.
+
 ```{r}
+unwanted_all <- c(
+  # Use values at or before first treatment
+  "modified_rankin_score_postop_within_1_week",
+  "modified_rankin_score_final"
+)
+
 unwanted_without_gradings <- c(
+  unwanted_all,
   # Spetzler-Martin grade (size score + eloquent location + venous drainage)
   "spetzler_martin_grade",
+  "is_spetzler_martin_grade_less_than_4",
   "size_score", # Already covered by the more detailed max_size_cm
   "venous_drainage", # Already covered by has_deep_venous_drainage
   "location", # Already covered to some extent by eloquence
   # Lawton-Young grade (SM + age + diffuse nidus + hemorrhage)
   # (SM is heavily overlapping with LY, so include its components)
   "lawton_young_grade",
-  # Use values at or before first treatment
-  "modified_rankin_score_final",
-  "modified_rankin_score_postop_within_1_week",
   # Use mRS pre-treatment (more predictive)
-  "modified_rankin_score_presentation"
-  # "modified_rankin_score_pretreatment"
+  "modified_rankin_score_presentation" # "modified_rankin_score_pretreatment"
 )
 
 # Define cols of interest - use grading scores whenever these exist
 unwanted_with_gradings <- c(
   # Spetzler-Martin grade (size score + eloquent location + venous drainage)
+  "is_spetzler_martin_grade_less_than_4", # The grade has lower p-value
   "size_score",
   "max_size_cm",
   "is_eloquent_location",
@@ -1912,36 +1762,387 @@ unwanted_with_gradings <- c(
 ```
 
 
+Create dataset.
+
+```{r}
+# Define cols
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL,
+  CHOSEN_OUTCOME
+))
+
+# Define column sets for each analysis
+cols_all <- cols[!cols %in% unwanted_all]
+cols_with_gradings <- cols[!cols %in% unwanted_with_gradings]
+cols_without_gradings <- cols[!cols %in% unwanted_without_gradings]
+
+# Create df of interest
+df_all <-
+  # Use the non-recoded dataset
+  df_uni %>%
+  dplyr::select(all_of(cols_all)) %>%
+  drop_na()
+
+df_with_gradings <-
+  # Use the non-recoded dataset
+  df_uni %>%
+  dplyr::select(all_of(cols_with_gradings)) %>%
+  drop_na()
+
+df_no_scores <-
+  # Use the non-recoded dataset
+  df_uni %>%
+  dplyr::select(all_of(cols_without_gradings)) %>%
+  drop_na()
+
+# Create formula
+frla <- as.formula(paste(CHOSEN_OUTCOME, " ~ . - 1"))
+
+# Create matrices with all variables
+X_all <- model.matrix(frla, df_all)
+y_all <- df_all %>%
+  pull(CHOSEN_OUTCOME) %>%
+  as.numeric()
+
+# Create matrices with scores
+X_with_gradings <- model.matrix(frla, df_with_gradings)
+y_with_gradings <- df_with_gradings %>%
+  pull(CHOSEN_OUTCOME) %>%
+  as.numeric()
+
+# Create matrices with score components
+X_without_gradings <- model.matrix(frla, df_no_scores)
+y_without_gradings <- df_no_scores %>%
+  pull(CHOSEN_OUTCOME) %>%
+  as.numeric()
+
+# X should be centered for LASSO (necessary for glmnet)
+# (scale = FALSE as this is done by the standardization step in glmnet)
+X_all_scaled <- scale(X_all, center = T, scale = F)
+X_with_gradings_scaled <- scale(X_with_gradings, center = T, scale = F)
+X_without_gradings_scaled <- scale(X_without_gradings, center = T, scale = F)
+
+# See the names of X to match column numbers to column names later on
+colnames(X_without_gradings_scaled)
+```
+
+
+## Stepwise
+
+Use step-wise linear regression methods.
+
+```{r}
+# Set seed
+set.seed(33)
+
+# Run forward step-wise
+fsfit <- fs(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  maxsteps = 2000,
+  intercept = TRUE,
+  normalize = FALSE
+)
+
+# Estimate sigma
+sigmahat <- estimateSigma(
+  x = X_without_gradings_scaled,
+  y = y_without_gradings,
+  intercept = TRUE,
+  standardize = FALSE
+)$sigmahat
+```
+
+```{r}
+# Compute sequential p-values and confidence intervals - for all
+# (sigma estimated from full model)
+out.seq <- fsInf(fsfit, type = "active", sigma = sigmahat)
+out.seq
+```
+
+```{r}
+# Compute p-values and confidence intervals after AIC stopping - for selected
+out.aic <- fsInf(fsfit, type = "aic", sigma = sigmahat)
+out.aic
+```
+
+```{r}
+# Compute p-values and confidence intervals after 5 fixed steps
+out.fix <- fsInf(fsfit, type = "all", k = 5, sigma = sigmahat)
+out.fix
+```
+
+
+## LASSO - all
+
+Use LASSO logistic regression using all available variables.
+
+```{r}
+# Set seed
+set.seed(141845)
+
+# Define values
+X <- X_all
+y <- y_all
+
+# Perform cross-validation
+# (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
+cv_fit <- cv.glmnet(
+  x = X,
+  y = y,
+  family = "binomial",
+  alpha = 1,
+  nfolds = 10
+)
+
+# Extract the best lambda
+best_lambda_min <- cv_fit$lambda.min
+best_lambda_1se <- cv_fit$lambda.1se
+
+# Run glmnet
+gfit <- glmnet(
+  x = X,
+  y = y,
+  family = "binomial",
+  alpha = 1,
+  intercept = TRUE,
+  standardize = TRUE
+)
+
+# Extract coef for a given lambda - avoid the intercept term
+# (given the small number of observations hence large SD, use min lambda)
+lambda <- best_lambda_min
+n <- nrow(y)
+beta <- coef(
+  x = X,
+  y = y,
+  object = gfit,
+  s = lambda,
+  exact = TRUE
+)
+
+# Estimate sigma
+gsigmahat <- estimateSigma(
+  x = X,
+  y = y,
+  intercept = TRUE,
+  standardize = TRUE
+)$sigmahat
+
+# Compute fixed lambda p-values and selection intervals
+out <- fixedLassoInf(
+  x = X,
+  y = y,
+  beta = beta,
+  lambda = lambda,
+  # Level of significance
+  alpha = 0.1,
+  family = "binomial",
+  intercept = TRUE,
+  sigma = gsigmahat
+)
+
+# Prettify
+tibble(
+  names = names(out$vars),
+  odds_ratio = exp(out$coef0),
+  pvalue = out$pv,
+  ci_lo = exp(out$ci[, 1]),
+  ci_hi = exp(out$ci[, 2])
+) %>%
+  arrange(pvalue) %>%
+  sable()
+```
+
+
+## LASSO - without scores
+
+Use LASSO logistic regression not based on previous gradings.
+
+```{r}
+# Set seed
+set.seed(141845)
+
+# Define values
+X <- X_without_gradings
+y <- y_without_gradings
+
+# Perform cross-validation
+# (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
+cv_fit <- cv.glmnet(
+  x = X,
+  y = y,
+  family = "binomial",
+  alpha = 1,
+  nfolds = 10
+)
+
+# Extract the best lambda
+best_lambda_min <- cv_fit$lambda.min
+best_lambda_1se <- cv_fit$lambda.1se
+
+# Run glmnet
+gfit <- glmnet(
+  x = X,
+  y = y,
+  family = "binomial",
+  alpha = 1,
+  intercept = TRUE,
+  standardize = TRUE
+)
+
+# Extract coef for a given lambda - avoid the intercept term
+# (given the small number of observations hence large SD, use min lambda)
+lambda <- best_lambda_min
+n <- nrow(y)
+beta <- coef(
+  x = X,
+  y = y,
+  object = gfit,
+  s = lambda,
+  exact = TRUE
+)
+
+# Estimate sigma
+gsigmahat <- estimateSigma(
+  x = X,
+  y = y,
+  intercept = TRUE,
+  standardize = TRUE
+)$sigmahat
+
+# Compute fixed lambda p-values and selection intervals
+out <- fixedLassoInf(
+  x = X,
+  y = y,
+  beta = beta,
+  lambda = lambda,
+  # Level of significance
+  alpha = 0.1,
+  family = "binomial",
+  intercept = TRUE,
+  sigma = gsigmahat
+)
+
+# Prettify
+tibble(
+  names = names(out$vars),
+  odds_ratio = exp(out$coef0),
+  pvalue = out$pv,
+  ci_lo = exp(out$ci[, 1]),
+  ci_hi = exp(out$ci[, 2])
+) %>%
+  arrange(pvalue) %>%
+  sable()
+```
+
+
+## LASSO - without components
+
+Use LASSO logistic regression based on previous gradings.
+
+```{r}
+# Set seed
+set.seed(141845)
+
+# Define values
+X <- X_with_gradings
+y <- y_with_gradings
+
+# Perform cross-validation
+# (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
+cv_fit <- cv.glmnet(
+  x = X,
+  y = y,
+  family = "binomial",
+  alpha = 1,
+  nfolds = 10
+)
+
+# Extract the best lambda
+best_lambda_min <- cv_fit$lambda.min
+best_lambda_1se <- cv_fit$lambda.1se
+
+# Run glmnet
+gfit <- glmnet(
+  x = X,
+  y = y,
+  family = "binomial",
+  alpha = 1,
+  intercept = TRUE,
+  standardize = TRUE
+)
+
+# Extract coef for a given lambda - avoid the intercept term
+# (given the small number of observations hence large SD, use min lambda)
+lambda <- best_lambda_min
+n <- nrow(y)
+beta <- coef(
+  x = X,
+  y = y,
+  object = gfit,
+  s = lambda,
+  exact = TRUE
+)
+
+# Estimate sigma
+gsigmahat <- estimateSigma(
+  x = X,
+  y = y,
+  intercept = TRUE,
+  standardize = TRUE
+)$sigmahat
+
+# Compute fixed lambda p-values and selection intervals
+out <- fixedLassoInf(
+  x = X,
+  y = y,
+  beta = beta,
+  lambda = lambda,
+  # Level of significance
+  alpha = 0.1,
+  family = "binomial",
+  intercept = TRUE,
+  sigma = gsigmahat
+)
+
+# Prettify
+tibble(
+  names = names(out$vars),
+  odds_ratio = exp(out$coef0),
+  pvalue = out$pv,
+  ci_lo = exp(out$ci[, 1]),
+  ci_hi = exp(out$ci[, 2])
+) %>%
+  arrange(pvalue) %>%
+  sable()
+```
+
+
+
+------------------------------------------------------------------------
+
+# Multivariable - Without scores
+
+## Setup
+
+
+
+
 ## Feature selection
 
 Create predictors.
 
 ```{r}
-# # Unwanted
-# unwanted <- c(
-#   # Highly correlated with SM grade but SM is more predictive
-#   "lawton_young_grade",
-#   # Highly correlated with SM grade but SM is more predictive
-#   "max_size_cm",
-#   # Highly correlated with SM grade but SM grade is more predictive
-#   "size_score",
-#   # Highly correlated with SM grade but SM grade is more predictive
-#   "dvd_score",
-#   # Highly correlated with SM grade but SM grade is more predictive
-#   "eloquence_score",
-#   # Highly correlated with mRS pre-tx but mRS pre-tx is more predictive
-#   "modified_rankin_score_presentation",
-#   # Stick to values before first treatment
-#   "modified_rankin_score_postop_within_1_week"
-# )
-
 # Define p-value threshold
 pval_threshold <- 0.2
 
 # Get the predictors of interest
 predictors <-
-  univariable_unadjusted %>%
-  bind_rows(univariable_adjusted) %>%
+  univariable_adjusted_recoded %>%
+  bind_rows(univariable_unadjusted_recoded) %>%
   filter(`P-values` < pval_threshold) %>%
   pull(`Predictors`)
 
@@ -2328,7 +2529,7 @@ varimp %>%
 
 ------------------------------------------------------------------------
 
-# Compute - Multivariable - With grading scores
+# Multivariable - Without components
 
 ## Feature selection
 
@@ -2724,22 +2925,10 @@ varimp %>%
   )
 ```
 
-
-------------------------------------------------------------------------
-
-# Compute - Compare models
-
-No statistical evidence that the grading-based model fits the data better than the grading-independent model based on the likelihood ratio test.
-
-```{r}
-anova(fit_without_grading, fit_with_grading, test = "LR")
-```
-
-
 ------------------------------------------------------------------------
 
 
-# Compute - Multi - Interaction
+# Multivariable - With interactions
 
 ## Presents with hemorrhage
 
@@ -2800,386 +2989,395 @@ stylized <-
 stylized %>% sable()
 ```
 
+------------------------------------------------------------------------
+
+
+# Model comparison
+
+## Likelihood ratio
+
+No statistical evidence that the grading-based model fits the data better than the grading-independent model based on the likelihood ratio test.
+
+```{r}
+anova(fit_without_grading, fit_with_grading, test = "LR")
+```
+
 
 ------------------------------------------------------------------------
 
-# Compute - Selective inference
+# Special cases
 
-Read the following guides:
-- [How to use glmnet](https://glmnet.stanford.edu/articles/glmnet.html)
-- [Selective inference using forward selection](https://stephens999.github.io/misc/selective_inference_toy.html)
+## SM < 4
 
-## Setup
-
-Create dataset.
+Select features.
 
 ```{r}
-# Define cols of interest - use grading scores whenever these exist
-unwanted_with_gradings <- c(
-  # Spetzler-Martin grade (size score + eloquent location + venous drainage)
-  "size_score",
-  "max_size_cm",
-  "is_eloquent_location",
-  # "location",  # Include this as not highly correlated with SM
-  "has_deep_venous_drainage",
-  "venous_drainage",
-  # Lawton-Young grade (SM + age + diffuse nidus + hemorrhage)
-  # (SM is heavily overlapping with LY, so include its components)
-  "lawton_young_grade",
-  # "is_diffuse_nidus",
-  # "has_hemorrhage",
-  # Use values at or before first treatment
-  "modified_rankin_score_final",
-  "modified_rankin_score_postop_within_1_week",
-  # Use mRS pre-treatment (more predictive)
-  "modified_rankin_score_presentation"
-  # "modified_rankin_score_pretreatment"
-)
+# Define p-value threshold
+pval_threshold <- 0.2
 
-unwanted_without_gradings <- c(
-  # Spetzler-Martin grade (size score + eloquent location + venous drainage)
-  "spetzler_martin_grade",
-  "size_score", # Already covered by the more detailed max_size_cm
-  "venous_drainage", # Already covered by has_deep_venous_drainage
-  "location", # Already covered to some extent by eloquence
-  # Lawton-Young grade (SM + age + diffuse nidus + hemorrhage)
-  # (SM is heavily overlapping with LY, so include its components)
-  "lawton_young_grade",
-  # Use values at or before first treatment
-  "modified_rankin_score_final",
-  "modified_rankin_score_postop_within_1_week",
-  # Use mRS pre-treatment (more predictive)
-  "modified_rankin_score_presentation"
-  # "modified_rankin_score_pretreatment"
-)
+# Get the predictors of interest
+predictors <-
+  univariable_adjusted_recoded %>%
+  bind_rows(univariable_unadjusted_recoded) %>%
+  filter(`P-values` < pval_threshold) %>%
+  pull(`Predictors`)
 
-cols <- unname(c(
-  EXPOSURES_CONTINUOUS,
-  EXPOSURES_BINARY,
-  EXPOSURES_CATEGORICAL,
-  CHOSEN_OUTCOME
+# Clean categorical variables
+predictors <-
+  predictors %>%
+  str_replace("^([a-z0-9_]*)([A-Z].*)$", "\\1") %>%
+  unique()
+
+# Add adjustment variables
+predictors <- unique(c(predictors))
+
+# Remove unwanted predictors
+predictors <- predictors[!predictors %in% unwanted_with_gradings]
+
+# Replace SM by its binary variant
+predictors <- c(predictors, "is_spetzler_martin_grade_less_than_4")
+predictors <- predictors[!predictors == "spetzler_martin_grade"]
+
+# Print
+print(predictors)
+```
+
+
+Fit logistic.
+
+```{r}
+# Define data
+df <- df_multi %>% drop_na(modified_rankin_score_pretreatment, location)
+
+# Create formula
+model <- as.formula(paste(
+  CHOSEN_OUTCOME,
+  "~",
+  paste(predictors, collapse = " + ")
 ))
 
-cols_with_gradings <- cols[!cols %in% unwanted_with_gradings]
-cols_without_gradings <- cols[!cols %in% unwanted_without_gradings]
-
-# Create df of interest
-df_with_gradings <-
-  # Use the non-recoded dataset
-  df_uni %>%
-  dplyr::select(all_of(cols_with_gradings)) %>%
-  drop_na()
-
-df_without_gradings <-
-  # Use the non-recoded dataset
-  df_uni %>%
-  dplyr::select(all_of(cols_without_gradings)) %>%
-  drop_na()
-
-# Create matrix
-frla <- as.formula(paste(CHOSEN_OUTCOME, " ~ . - 1"))
-X_with_gradings <- model.matrix(frla, df_with_gradings)
-y_with_gradings <- df_with_gradings %>%
-  pull(CHOSEN_OUTCOME) %>%
-  as.numeric()
-X_without_gradings <- model.matrix(frla, df_without_gradings)
-y_without_gradings <- df_without_gradings %>%
-  pull(CHOSEN_OUTCOME) %>%
-  as.numeric()
-
-# X should be centered for LASSO (necessary for glmnet)
-# (scale = FALSE as this is done by the standardization step in glmnet)
-X_with_gradings_scaled <- scale(X_with_gradings, center = TRUE, scale = FALSE)
-X_without_gradings_scaled <- scale(X_without_gradings, center = TRUE, scale = FALSE)
-
-# See the names of X to match column numbers to column names later on
-colnames(X_without_gradings_scaled)
-```
-
-
-## Stepwise
-
-Use step-wise linear regression methods.
-
-```{r}
-# Set seed
-set.seed(33)
-
-# Run forward step-wise
-fsfit <- fs(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  maxsteps = 2000,
-  intercept = TRUE,
-  normalize = FALSE
+fit <- glm(
+  model,
+  data = df,
+  family = binomial()
 )
 
-# Estimate sigma
-sigmahat <- estimateSigma(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  intercept = TRUE,
-  standardize = FALSE
-)$sigmahat
-```
-
-```{r}
-# Compute sequential p-values and confidence intervals - for all
-# (sigma estimated from full model)
-out.seq <- fsInf(fsfit, type = "active", sigma = sigmahat)
-out.seq
-```
-
-```{r}
-# Compute p-values and confidence intervals after AIC stopping - for selected
-out.aic <- fsInf(fsfit, type = "aic", sigma = sigmahat)
-out.aic
-```
-
-```{r}
-# Compute p-values and confidence intervals after 5 fixed steps
-out.fix <- fsInf(fsfit, type = "all", k = 5, sigma = sigmahat)
-out.fix
+# Save
+fit_without_grading <- fit
 ```
 
 
-## LASSO - linear regression
-
-Use LASSO linear regression not based on previous gradings.
+Print results.
 
 ```{r}
-# Set seed
-set.seed(141704)
+# Summarize model coefficients
+fit_summary <-
+  fit %>%
+  broom::tidy(exponentiate = T, conf.int = T) %>%
+  arrange(term == "(Intercept)", p.value) %>%
+  rename(odds_ratio = estimate, z_value = statistic)
 
-# Perform cross-validation
-# (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
-cv_fit <- cv.glmnet(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  family = "gaussian",
-  alpha = 1,
-  nfolds = 10
+# Stylize and print
+stylized <-
+  fit_summary %>%
+  rename(
+    "Predictors" = term,
+    "Odds Ratios (OR)" = odds_ratio,
+    "SE" = std.error,
+    "Z-scores" = z_value,
+    "P-values" = p.value,
+    "CI (low)" = conf.low,
+    "CI (high)" = conf.high,
+  ) %>%
+  mutate(
+    `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+    `SE` = round(`SE`, 2),
+    `CI (low)` = round(`CI (low)`, 2),
+    `CI (high)` = round(`CI (high)`, 2),
+    `P-values` = round(`P-values`, 3),
+  )
+
+# Print
+stylized %>% sable()
+```
+
+
+Create robust CIs using the sandwich estimator.
+
+```{r}
+# Calculate robust standard errors
+robust_se <- sandwich::vcovHC(fit, type = "HC0")
+
+# Compute robust confidence intervals
+robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+```
+
+
+Stylize results.
+
+```{r}
+# Summarize model coefficients
+fit_summary <-
+  robust_ci %>%
+  # broom does not support exponentiation after coeftest so do it manually
+  broom::tidy(exponentiate = F, conf.int = T) %>%
+  mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+  arrange(term == "(Intercept)", p.value) %>%
+  rename(odds_ratio = estimate, z_value = statistic)
+
+# Stylize and print
+multivariable_pvalue <-
+  fit_summary %>%
+  rename(
+    "Predictors" = term,
+    "Odds Ratios (OR)" = odds_ratio,
+    "SE" = std.error,
+    "Z-scores" = z_value,
+    "P-values" = p.value,
+    "CI (low)" = conf.low,
+    "CI (high)" = conf.high,
+  ) %>%
+  mutate(
+    `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+    `SE` = round(`SE`, 2),
+    `CI (low)` = round(`CI (low)`, 2),
+    `CI (high)` = round(`CI (high)`, 2),
+    `P-values` = round(`P-values`, 3),
+  )
+
+# Print
+multivariable_pvalue %>% sable()
+```
+
+
+Plot the coefficients with their confidence intervals.
+
+```{r, fig.height=4, fig.width=8}
+robust_ci %>%
+  # broom does not support exponentiation after coeftest so do it manually
+  broom::tidy(exponentiate = F, conf.int = T) %>%
+  mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+  filter(term != "(Intercept)") %>%
+  arrange(desc(estimate)) %>%
+  mutate(term = factor(term, levels = term)) %>%
+  ggplot(aes(x = estimate, y = term, color = term)) +
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high)) +
+  geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+  labs(x = "Odds ratio", y = NULL) +
+  guides(color = F) +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13)
+  )
+
+# Dotwhisker was not giving me the correct plot
+# dotwhisker::dwplot(
+#   vline = geom_vline(xintercept = 1, linetype = 2, alpha =  0.5),
+#   show_intercept = F
+# )
+```
+
+
+## Had surgery
+
+Select features.
+
+```{r}
+# Define p-value threshold
+pval_threshold <- 0.2
+
+# Get the predictors of interest
+predictors <-
+  univariable_adjusted_recoded %>%
+  bind_rows(univariable_unadjusted_recoded) %>%
+  filter(`P-values` < pval_threshold) %>%
+  pull(`Predictors`)
+
+# Clean categorical variables
+predictors <-
+  predictors %>%
+  str_replace("^([a-z0-9_]*)([A-Z].*)$", "\\1") %>%
+  unique()
+
+# Add adjustment variables
+predictors <- unique(c(predictors))
+
+# Remove unwanted predictors
+predictors <- predictors[!predictors %in% unwanted_with_gradings]
+
+# Replace SM by its binary variant
+predictors <- c(predictors, "is_surgery")
+predictors <- predictors[!predictors == "procedure_combinations"]
+
+# Print
+print(predictors)
+```
+
+
+Fit logistic.
+
+```{r}
+# Define data
+df <- df_multi %>% drop_na(modified_rankin_score_pretreatment, location)
+
+# Create formula
+model <- as.formula(paste(
+  CHOSEN_OUTCOME,
+  "~",
+  paste(predictors, collapse = " + ")
+))
+
+fit <- glm(
+  model,
+  data = df,
+  family = binomial()
 )
 
-# Extract the best lambda
-best_lambda_min <- cv_fit$lambda.min
-best_lambda_1se <- cv_fit$lambda.1se
+# Save
+fit_without_grading <- fit
+```
 
-# Run glmnet
-gfit <- glmnet(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  family = "gaussian",
-  alpha = 1,
-  lambda = c(best_lambda_min, best_lambda_1se),
-  intercept = TRUE,
-  standardize = TRUE
-)
 
-# Extract coef for a given lambda - avoid the intercept term
-# (given the small number of observations hence large SD, use min lambda)
-lambda <- best_lambda_min
-n <- nrow(y_without_gradings)
-beta <- coef(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  object = gfit,
-  s = lambda,
-  exact = TRUE
-)[-1]
+Print results.
 
-# Estimate sigma
-gsigmahat <- estimateSigma(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  intercept = TRUE,
-  standardize = TRUE
-)$sigmahat
+```{r}
+# Summarize model coefficients
+fit_summary <-
+  fit %>%
+  broom::tidy(exponentiate = T, conf.int = T) %>%
+  arrange(term == "(Intercept)", p.value) %>%
+  rename(odds_ratio = estimate, z_value = statistic)
 
-# Compute fixed lambda p-values and selection intervals
-out <- fixedLassoInf(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  beta = beta,
-  lambda = lambda,
-  family = "gaussian",
-  intercept = TRUE,
-  sigma = gsigmahat
-)
+# Stylize and print
+stylized <-
+  fit_summary %>%
+  rename(
+    "Predictors" = term,
+    "Odds Ratios (OR)" = odds_ratio,
+    "SE" = std.error,
+    "Z-scores" = z_value,
+    "P-values" = p.value,
+    "CI (low)" = conf.low,
+    "CI (high)" = conf.high,
+  ) %>%
+  mutate(
+    `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+    `SE` = round(`SE`, 2),
+    `CI (low)` = round(`CI (low)`, 2),
+    `CI (high)` = round(`CI (high)`, 2),
+    `P-values` = round(`P-values`, 3),
+  )
 
-# Prettify
-tibble(
-  names = names(out$vars),
-  coefficient = exp(out$coef0),
-  pvalue = out$pv,
-  ci_lo = exp(out$ci[, 1]),
-  ci_hi = exp(out$ci[, 2])
-) %>%
-  arrange(pvalue) %>%
+# Print
+stylized %>% sable()
+```
+
+
+Create robust CIs using the sandwich estimator.
+
+```{r}
+# Calculate robust standard errors
+robust_se <- sandwich::vcovHC(fit, type = "HC0")
+
+# Compute robust confidence intervals
+robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+```
+
+
+Stylize results.
+
+```{r}
+# Summarize model coefficients
+fit_summary <-
+  robust_ci %>%
+  # broom does not support exponentiation after coeftest so do it manually
+  broom::tidy(exponentiate = F, conf.int = T) %>%
+  mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+  arrange(term == "(Intercept)", p.value) %>%
+  rename(odds_ratio = estimate, z_value = statistic)
+
+# Stylize and print
+multivariable_pvalue <-
+  fit_summary %>%
+  rename(
+    "Predictors" = term,
+    "Odds Ratios (OR)" = odds_ratio,
+    "SE" = std.error,
+    "Z-scores" = z_value,
+    "P-values" = p.value,
+    "CI (low)" = conf.low,
+    "CI (high)" = conf.high,
+  ) %>%
+  mutate(
+    `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+    `SE` = round(`SE`, 2),
+    `CI (low)` = round(`CI (low)`, 2),
+    `CI (high)` = round(`CI (high)`, 2),
+    `P-values` = round(`P-values`, 3),
+  )
+
+# Print
+multivariable_pvalue %>% sable()
+```
+
+
+Plot the coefficients with their confidence intervals.
+
+```{r, fig.height=4, fig.width=8}
+robust_ci %>%
+  # broom does not support exponentiation after coeftest so do it manually
+  broom::tidy(exponentiate = F, conf.int = T) %>%
+  mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+  filter(term != "(Intercept)") %>%
+  arrange(desc(estimate)) %>%
+  mutate(term = factor(term, levels = term)) %>%
+  ggplot(aes(x = estimate, y = term, color = term)) +
+  geom_pointrange(aes(xmin = conf.low, xmax = conf.high)) +
+  geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+  labs(x = "Odds ratio", y = NULL) +
+  guides(color = F) +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13)
+  )
+
+# Dotwhisker was not giving me the correct plot
+# dotwhisker::dwplot(
+#   vline = geom_vline(xintercept = 1, linetype = 2, alpha =  0.5),
+#   show_intercept = F
+# )
+```
+
+
+## Grade 5s
+
+```{r}
+df_uni %>%
+  drop_na(spetzler_martin_grade) %>%
+  count(is_poor_outcome, spetzler_martin_grade, name = "num_patients") %>%
+  mutate(
+    pct_patients = scales::percent(num_patients / sum(num_patients), 1)
+  ) %>%
   sable()
 ```
 
 
-## LASSO - logistic - without grading scores
-
-Use LASSO logistic regression not based on previous gradings.
+Only consider those with SM grade 5.
 
 ```{r}
-# Set seed
-set.seed(141845)
-
-# Perform cross-validation
-# (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
-cv_fit <- cv.glmnet(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  family = "binomial",
-  alpha = 1,
-  nfolds = 10
-)
-
-# Extract the best lambda
-best_lambda_min <- cv_fit$lambda.min
-best_lambda_1se <- cv_fit$lambda.1se
-
-# Run glmnet
-gfit <- glmnet(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  family = "binomial",
-  alpha = 1,
-  intercept = TRUE,
-  standardize = TRUE
-)
-
-# Extract coef for a given lambda - avoid the intercept term
-# (given the small number of observations hence large SD, use min lambda)
-lambda <- best_lambda_min
-n <- nrow(y_without_gradings)
-beta <- coef(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  object = gfit,
-  s = lambda,
-  exact = TRUE
-)
-
-# Estimate sigma
-gsigmahat <- estimateSigma(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  intercept = TRUE,
-  standardize = TRUE
-)$sigmahat
-
-# Compute fixed lambda p-values and selection intervals
-out <- fixedLassoInf(
-  x = X_without_gradings_scaled,
-  y = y_without_gradings,
-  beta = beta,
-  lambda = lambda,
-  # Level of significance
-  alpha = 0.1,
-  family = "binomial",
-  intercept = TRUE,
-  sigma = gsigmahat
-)
-
-# Prettify
-tibble(
-  names = names(out$vars),
-  odds_ratio = exp(out$coef0),
-  pvalue = out$pv,
-  ci_lo = exp(out$ci[, 1]),
-  ci_hi = exp(out$ci[, 2])
-) %>%
-  arrange(pvalue) %>%
-  sable()
-```
-
-
-## LASSO - logistic - with grading scores
-
-Use LASSO logistic regression based on previous gradings.
-
-```{r}
-# Set seed
-set.seed(141708)
-
-# Perform cross-validation
-# (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
-cv_fit <- cv.glmnet(
-  x = X_with_gradings_scaled,
-  y = y_without_gradings,
-  family = "binomial",
-  alpha = 1,
-  nfolds = 10
-)
-
-# Extract the best lambda
-best_lambda_min <- cv_fit$lambda.min
-best_lambda_1se <- cv_fit$lambda.1se
-
-# Run glmnet
-gfit <- glmnet(
-  x = X_with_gradings_scaled,
-  y = y_without_gradings,
-  family = "binomial",
-  alpha = 1,
-  lambda = c(best_lambda_min, best_lambda_1se),
-  intercept = TRUE,
-  standardize = TRUE
-)
-
-# Extract coef for a given lambda - avoid the intercept term
-# (given the small number of observations hence large SD, use min lambda)
-lambda <- best_lambda_min
-n <- nrow(y_without_gradings)
-beta <- coef(
-  x = X_with_gradings_scaled,
-  y = y_without_gradings,
-  object = gfit,
-  s = lambda,
-  exact = TRUE
-)
-
-# Estimate sigma
-gsigmahat <- estimateSigma(
-  x = X_with_gradings_scaled,
-  y = y_without_gradings,
-  intercept = TRUE,
-  standardize = TRUE
-)$sigmahat
-
-# Compute fixed lambda p-values and selection intervals
-out <- fixedLassoInf(
-  x = X_with_gradings_scaled,
-  y = y_without_gradings,
-  beta = beta,
-  lambda = lambda,
-  # Level of significance
-  alpha = 0.1,
-  family = "binomial",
-  intercept = TRUE,
-  sigma = gsigmahat
-)
-
-# Prettify
-tibble(
-  names = names(out$vars),
-  odds_ratio = exp(out$coef0),
-  pvalue = out$pv,
-  ci_lo = exp(out$ci[, 1]),
-  ci_hi = exp(out$ci[, 2])
-) %>%
-  arrange(pvalue) %>%
+df_uni %>%
+  filter(spetzler_martin_grade == 5) %>%
+  count(is_poor_outcome, spetzler_martin_grade, name = "num_patients") %>%
+  mutate(
+    pct_patients = scales::percent(num_patients / sum(num_patients), 1)
+  ) %>%
   sable()
 ```
 
 
 ------------------------------------------------------------------------
 
-# Compute - Honest esitmation
+# Honest esitmation (WIP)
 
 https://www.pnas.org/doi/full/10.1073/pnas.1510489113
 https://arxiv.org/pdf/1510.04342
@@ -3189,12 +3387,12 @@ https://grf-labs.github.io/grf/REFERENCE.html
 https://cran.r-project.org/web/packages/hettx/vignettes/detect_idiosyncratic_vignette.html
 
 
-```{r}
+```{r echo=FALSE}
 library(grf)
 ```
 
 
-```{r}
+```{r echo=FALSE}
 # Generate data.
 n <- 2000
 p <- 10
@@ -3369,7 +3567,7 @@ Write all data.
 
 ## Linting and styling
 
-```{r, echo=FALSE, results="hide"}
+```{r, eval=FALSE}
 # Style current file
 styler::style_file(
   path = rstudioapi::getSourceEditorContext()$path,
