@@ -959,76 +959,80 @@ table1_descriptive_statistics
 ## By hemorrhage
 
 ```{r}
-# Define arguments
-interaction_col <- "has_hemorrhage"
-interaction_col_name <- "Hemorrhage at presentation"
-prefix_true <- "Haem"
-prefix_false <- "No Haem"
-
-# Get all
-out <- list()
-out[[1]] <- compute_descriptive_continuous(
-  use_interaction = F,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = T,
-  prefix = "All"
-)
-out[[2]] <- compute_descriptive_binary(
-  use_interaction = F,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = T,
-  prefix = "All"
-)
-out_all <- bind_rows(out)
-
-# Get with hemorrhage
-out <- list()
-out[[1]] <- compute_descriptive_continuous(
-  use_interaction = T,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = T,
-  prefix = prefix_true
-)
-out[[2]] <- compute_descriptive_binary(
-  use_interaction = T,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = T,
-  prefix = prefix_true
-)
-out_haem <- bind_rows(out)
-
-# Get without hemorrhage
-out <- list()
-out[[1]] <- compute_descriptive_continuous(
-  use_interaction = T,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = F,
-  prefix = prefix_false
-)
-out[[2]] <- compute_descriptive_binary(
-  use_interaction = T,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = F,
-  prefix = prefix_false
-)
-out_no_haem <- bind_rows(out)
-
-# Synthesize
-out_complete <-
-  out_all %>%
-  left_join(out_haem, by = "keys") %>%
-  left_join(out_no_haem, by = "keys") %>%
-  arrange(`All - P-value`)
-
-# Print
-out_complete %>%
-  sable()
+if (!str_detect(params$TITLE, "Hemorrhage")) {
+  
+  # Define arguments
+  interaction_col <- "has_hemorrhage"
+  interaction_col_name <- "Hemorrhage at presentation"
+  prefix_true <- "Haem"
+  prefix_false <- "No Haem"
+  
+  # Get all
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = F,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = "All"
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = F,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = "All"
+  )
+  out_all <- bind_rows(out)
+  
+  # Get with hemorrhage
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = prefix_true
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = prefix_true
+  )
+  out_haem <- bind_rows(out)
+  
+  # Get without hemorrhage
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = F,
+    prefix = prefix_false
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = F,
+    prefix = prefix_false
+  )
+  out_no_haem <- bind_rows(out)
+  
+  # Synthesize
+  out_complete <-
+    out_all %>%
+    left_join(out_haem, by = "keys") %>%
+    left_join(out_no_haem, by = "keys") %>%
+    arrange(`All - P-value`)
+  
+  # Print
+  out_complete %>%
+    sable()
+  
+}
 ```
 
 
@@ -1107,6 +1111,7 @@ out_complete %>%
   sable()
 ```
 
+
 ------------------------------------------------------------------------
 
 # Associations
@@ -1114,15 +1119,23 @@ out_complete %>%
 Correlation matrix.
 
 ```{r, fig.height=8, fig.width=8}
+# Cols
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL,
+  OUTCOMES
+)
+
+# Remove hemorrhage
+if (str_detect(params$TITLE, "Hemorrhage")) {
+  cols <- cols[!cols == "has_hemorrhage"]
+}
+  
 # Create new dataframe
 df_ <-
   df_uni %>%
-  select(
-    EXPOSURES_CONTINUOUS,
-    EXPOSURES_BINARY,
-    EXPOSURES_CATEGORICAL,
-    OUTCOMES
-  )
+  select(all_of(cols))
 
 # Convert the outcome variable to numeric for correlation calculation
 df_ <-
@@ -1722,6 +1735,11 @@ unwanted_all <- c(
   "modified_rankin_score_final"
 )
 
+# Remove hemorrhage from the mix
+if (str_detect(params$TITLE, "Hemorrhage")) {
+  unwanted_all <- c(unwanted_all, "has_hemorrhage")
+}
+
 unwanted_without_gradings <- c(
   unwanted_all,
   # Spetzler-Martin grade (size score + eloquent location + venous drainage)
@@ -1944,16 +1962,20 @@ out <- fixedLassoInf(
   sigma = gsigmahat
 )
 
-# Prettify
-tibble(
-  names = names(out$vars),
-  odds_ratio = exp(out$coef0),
-  pvalue = out$pv,
-  ci_lo = exp(out$ci[, 1]),
-  ci_hi = exp(out$ci[, 2])
-) %>%
-  arrange(pvalue) %>%
-  sable()
+# Print model (make this robust to no variable being selected)
+if (length(out) > 0) {
+  tibble(
+    names = names(out$vars),
+    odds_ratio = exp(out$coef0),
+    pvalue = out$pv,
+    ci_lo = exp(out$ci[, 1]),
+    ci_hi = exp(out$ci[, 2])
+  ) %>%
+    arrange(pvalue) %>%
+    sable()
+} else {
+  print("No variables were selected")
+}
 ```
 
 
@@ -2026,16 +2048,20 @@ out <- fixedLassoInf(
   sigma = gsigmahat
 )
 
-# Prettify
-tibble(
-  names = names(out$vars),
-  odds_ratio = exp(out$coef0),
-  pvalue = out$pv,
-  ci_lo = exp(out$ci[, 1]),
-  ci_hi = exp(out$ci[, 2])
-) %>%
-  arrange(pvalue) %>%
-  sable()
+# Print model (make this robust to no variable being selected)
+if (length(out) > 0) {
+  tibble(
+    names = names(out$vars),
+    odds_ratio = exp(out$coef0),
+    pvalue = out$pv,
+    ci_lo = exp(out$ci[, 1]),
+    ci_hi = exp(out$ci[, 2])
+  ) %>%
+    arrange(pvalue) %>%
+    sable()
+} else {
+  print("No variables were selected")
+}
 ```
 
 
@@ -2108,16 +2134,20 @@ out <- fixedLassoInf(
   sigma = gsigmahat
 )
 
-# Prettify
-tibble(
-  names = names(out$vars),
-  odds_ratio = exp(out$coef0),
-  pvalue = out$pv,
-  ci_lo = exp(out$ci[, 1]),
-  ci_hi = exp(out$ci[, 2])
-) %>%
-  arrange(pvalue) %>%
-  sable()
+# Print model (make this robust to no variable being selected)
+if (length(out) > 0) {
+  tibble(
+    names = names(out$vars),
+    odds_ratio = exp(out$coef0),
+    pvalue = out$pv,
+    ci_lo = exp(out$ci[, 1]),
+    ci_hi = exp(out$ci[, 2])
+  ) %>%
+    arrange(pvalue) %>%
+    sable()
+} else {
+  print("No variables were selected")
+}
 ```
 
 
@@ -2125,11 +2155,6 @@ tibble(
 ------------------------------------------------------------------------
 
 # Multivariable - Without scores
-
-## Setup
-
-
-
 
 ## Feature selection
 
@@ -3380,19 +3405,22 @@ df_uni %>%
 # Honest esitmation (WIP)
 
 https://www.pnas.org/doi/full/10.1073/pnas.1510489113
+
 https://arxiv.org/pdf/1510.04342
 
 https://github.com/grf-labs/grf
+
 https://grf-labs.github.io/grf/REFERENCE.html
+
 https://cran.r-project.org/web/packages/hettx/vignettes/detect_idiosyncratic_vignette.html
 
 
-```{r echo=FALSE}
+```{r eval=FALSE, include=FALSE}
 library(grf)
 ```
 
 
-```{r echo=FALSE}
+```{r eval=FALSE, include=FALSE}
 # Generate data.
 n <- 2000
 p <- 10
