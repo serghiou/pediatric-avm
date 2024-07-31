@@ -54,14 +54,6 @@ output:
     highlight: github # or: vignette
     toc: TRUE         # no toc_float available
     df_print: kable   # obviates %>% kable; does not replace styling though
-  html_document:
-    highlight: tango
-    theme: sandstone
-    df_print: kable
-    toc: yes
-    toc_depth: 2
-    toc_float: yes
-    css: "path_to_custom.css"
 header-includes:
 - \DeclareUnicodeCharacter{3B8}{~}
 - \DeclareUnicodeCharacter{3B1}{~}
@@ -160,7 +152,7 @@ knitr::knit_hooks$set(timeit = local({
 
 options(
   knitr.kable.NA = "", # replace NAs in tables with blank
-  digits = 3 # round digits (doesn't work without this here!)
+  digits = 5 # round digits (doesn't work without this here!)
 )
 
 ## Example use
@@ -473,6 +465,7 @@ df_uni <-
   relocate(is_surgery, .after = procedure_combinations)
 ```
 
+
 For `location`, reduce choices (use "Other").
 
 ```{r}
@@ -495,6 +488,7 @@ For `spetzler_martin_grade`, create a binary variant of 1-3 vs. 4-5.
 df_multi <-
   df_multi %>%
   mutate(
+    # Divides into low grade vs. high grade
     is_spetzler_martin_grade_less_than_4 = spetzler_martin_grade < 4
   ) %>%
   relocate(is_spetzler_martin_grade_less_than_4, .after = spetzler_martin_grade)
@@ -633,6 +627,46 @@ df_long %>%
   )
 ```
 
+
+## By SM grade high vs. low
+
+```{r, fig.width=14, fig.height=12}
+# Define the predictors of interest
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  CHOSEN_OUTCOME
+)
+
+# Reshape the data
+df_long <-
+  df_uni %>%
+  select(all_of(cols)) %>%
+  pivot_longer(
+    cols = -c(CHOSEN_OUTCOME, `Spetzler-Martin grade < 4`),
+    names_to = "predictor",
+    values_to = "value"
+  )
+
+# Plot the box plots
+df_long %>%
+  ggplot(aes_string(
+    x = CHOSEN_OUTCOME,
+    y = "value",
+    fill = "`Spetzler-Martin grade < 4`",
+    color = "`Spetzler-Martin grade < 4`"
+  )) +
+  geom_boxplot(alpha = 0.5) +
+  facet_wrap(~predictor, scales = "free") +
+  labs(x = "Outcome", y = "Value", fill = "Outcome") +
+  theme_minimal() +
+  guides(fill = "none") +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11),
+    strip.text = element_text(size = 11)
+  )
+```
 
 ------------------------------------------------------------------------
 
@@ -1046,6 +1080,82 @@ interaction_col <- "is_diffuse_nidus"
 interaction_col_name <- "Is diffuse nidus"
 prefix_true <- "Diffuse"
 prefix_false <- "Not Diffuse"
+
+# Get all
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out_all <- bind_rows(out)
+
+# Get with hemorrhage
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = prefix_true
+)
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = prefix_true
+)
+out_haem <- bind_rows(out)
+
+# Get without hemorrhage
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = F,
+  prefix = prefix_false
+)
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = F,
+  prefix = prefix_false
+)
+out_no_haem <- bind_rows(out)
+
+# Synthesize
+out_complete <-
+  out_all %>%
+  left_join(out_haem, by = "keys") %>%
+  left_join(out_no_haem, by = "keys") %>%
+  arrange(`All - P-value`)
+
+# Print
+out_complete %>%
+  sable()
+```
+
+
+## By SM grade high vs. low
+
+```{r}
+# Define arguments
+interaction_col <- "is_spetzler_martin_grade_less_than_4"
+interaction_col_name <- "Spetzler-Martin grade < 4"
+prefix_true <- "Low grade"
+prefix_false <- "High grade"
 
 # Get all
 out <- list()
@@ -1723,7 +1833,9 @@ df %>%
 # Selective inference
 
 Read the following guides:
+
 - [How to use glmnet](https://glmnet.stanford.edu/articles/glmnet.html)
+
 - [Selective inference using forward selection](https://stephens999.github.io/misc/selective_inference_toy.html)
 
 ## Setup
@@ -1734,7 +1846,9 @@ Define unwanted columns.
 unwanted_all <- c(
   # Use values at or before first treatment
   "modified_rankin_score_postop_within_1_week",
-  "modified_rankin_score_final"
+  "modified_rankin_score_final",
+  # Use the split between high vs. low grade instead of the granular
+  "spetzler_martin_grade"
 )
 
 # Remove hemorrhage from the mix
@@ -1745,7 +1859,6 @@ if (str_detect(params$TITLE, "Hemorrhage")) {
 unwanted_without_gradings <- c(
   unwanted_all,
   # Spetzler-Martin grade (size score + eloquent location + venous drainage)
-  "spetzler_martin_grade",
   "is_spetzler_martin_grade_less_than_4",
   "size_score", # Already covered by the more detailed max_size_cm
   "venous_drainage", # Already covered by has_deep_venous_drainage
@@ -3611,7 +3724,7 @@ lintr::lint(rstudioapi::getSourceEditorContext()$path)
 
 ## Dependency management
 
-```{r, results="hide"}
+```{r, eval=FALSE, results="hide"}
 # Clean up project of libraries not in use
 # (use prompt = FALSE to avoid the interactive session)
 # (packages can only be removed in interactive mode b/c this is destructive)
