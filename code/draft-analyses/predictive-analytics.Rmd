@@ -13,7 +13,7 @@ params:
     sep: ""
   CONFIG: 
     label: "Config file name"
-    value: "config_poor-outcomes.R"
+    value: "config_is-poor-outcome.R"
     input: select
     choices: [
       "config_is-poor-outcome.R",
@@ -420,11 +420,13 @@ Create two dataframes - one for univariable and one for multivariable analysis. 
 ```{r}
 df_uni <-
   patients_ %>%
-  filter(is_eligible)
+  filter(is_eligible) %>% 
+  filter(!is.na(spetzler_martin_grade))
 
 df_multi <-
   patients_ %>%
-  filter(is_eligible)
+  filter(is_eligible) %>% 
+  filter(!is.na(spetzler_martin_grade))
 ```
 
 
