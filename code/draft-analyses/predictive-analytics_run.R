@@ -28,7 +28,7 @@ output_files_suffix <- str_extract(configs, "(?<=config_)[^.]+(?=\\.R)")
 output_files <- paste0(output_files_prefix, output_files_suffix, ".html")
 
 # Render
-for (i in seq_along(config)) {
+for (i in seq_along(configs)) {
   # Create parameters list
   params <- list(
     PROPORTION_OF_DATA = proportion_of_data,
