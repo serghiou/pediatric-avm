@@ -1,5 +1,6 @@
 # Load libraries
 library(rmarkdown)
+library(stringr)
 
 # Define parameters
 proportion_of_data <- 1
@@ -23,8 +24,8 @@ titles <- c(
 )
 
 # Create the output file names
-output_files_prefix <- "predictive-analytics_"
-output_files_suffix <- str_extract(configs, "(?<=config_)[^.]+(?=\\.R)")
+output_files_prefix <- "outputs/predictive-analytics/"
+output_files_suffix <- stringr::str_extract(configs, "(?<=config_)[^.]+(?=\\.R)")
 output_files <- paste0(output_files_prefix, output_files_suffix, ".html")
 
 # Render
