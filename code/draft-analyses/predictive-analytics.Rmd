@@ -39,7 +39,7 @@ output:
   rmdformats::readthedown:
     highlight: kate
     df_print: kable    # obviates %>% kable; does not replace styling though
-    code_folding: show # [hide, show] (comment out to not give option)
+    code_folding: hide # [hide, show] (comment out to not give option)
   pdf_document:
     highlight: tango
     df_print: kable
