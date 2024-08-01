@@ -106,7 +106,7 @@ opts_chunk$set(
   comment = NA,
   fig.align = "center",
   fig.width = 7,
-  fig.path = "Figs/", # export all figures to dir Figs
+  fig.path = "../../outputs/predictive-analytics/figs/", # export all figures
   linewidth = 91,
   width = 75
 )
