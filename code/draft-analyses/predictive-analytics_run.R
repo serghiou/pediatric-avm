@@ -40,7 +40,7 @@ for (i in seq_along(configs)) {
   # Render
   rmarkdown::render(
     input = "code/draft-analyses/predictive-analytics.Rmd",
-    params = params, 
+    params = params,
     output_file = output_files[i],
     envir = new.env()
   )
