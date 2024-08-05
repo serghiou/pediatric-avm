@@ -2348,7 +2348,9 @@ if (length(out) > 0) {
     mutate(
       term = prettify_terms(term, cols),
       term = factor(term, levels = term)
-    )
+    ) %>%
+    # Cup the high confidence interval to make the figure readable
+    mutate(ci_hi = ifelse(ci_hi > 50, 50, ci_hi))
   
   # Plot
   coef_table %>%
@@ -2358,7 +2360,7 @@ if (length(out) > 0) {
     labs(x = "Odds ratio", y = NULL) +
     guides(color = F) +
     scale_x_continuous(
-      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
+      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 6))
     ) +
     theme(
       axis.text = element_text(size = 12),
@@ -2501,7 +2503,9 @@ if (length(out) > 0) {
     mutate(
       term = prettify_terms(term, cols),
       term = factor(term, levels = term)
-    )
+    ) %>%
+    # Cup the high confidence interval to make the figure readable
+    mutate(ci_hi = ifelse(ci_hi > 50, 50, ci_hi))
   
   # Plot
   coef_table %>%
@@ -2511,7 +2515,7 @@ if (length(out) > 0) {
     labs(x = "Odds ratio", y = NULL) +
     guides(color = F) +
     scale_x_continuous(
-      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
+      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 6))
     ) +
     theme(
       axis.text = element_text(size = 12),
@@ -2657,7 +2661,9 @@ if (length(out) > 0) {
     mutate(
       term = prettify_terms(term, cols),
       term = factor(term, levels = term)
-    )
+    ) %>%
+    # Cup the high confidence interval to make the figure readable
+    mutate(ci_hi = ifelse(ci_hi > 50, 50, ci_hi))
   
   # Plot
   coef_table %>%
@@ -2667,7 +2673,7 @@ if (length(out) > 0) {
     labs(x = "Odds ratio", y = NULL) +
     guides(color = F) +
     scale_x_continuous(
-      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
+      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 6))
     ) +
     theme(
       axis.text = element_text(size = 12),
@@ -2854,6 +2860,8 @@ prettify_terms <- function(old_terms, col_names = cols) {
   return(new_terms)
 }
 
+if (length(predictors) > 0) {
+  
 # Create table
 coef_table <-
   robust_ci %>%
@@ -2865,6 +2873,12 @@ coef_table <-
   mutate(
     term = prettify_terms(term, cols),
     term = factor(term, levels = term)
+  ) %>%
+  # Cup the values to make the figure readable
+  mutate(
+    conf.low = ifelse(conf.high > 50, 50, conf.high),
+    conf.high = ifelse(conf.high > 50, 50, conf.high),
+    estimate = ifelse(estimate > 50, 50, estimate)
   )
 
 # Plot
@@ -2875,12 +2889,13 @@ coef_table %>%
   labs(x = "Odds ratio", y = NULL) +
   guides(color = F) +
   scale_x_continuous(
-    breaks = as.integer(seq(0, max(coef_table$conf.high), length.out = 5))
+    breaks = as.integer(seq(0, max(coef_table$conf.high), length.out = 6))
   ) +
   theme(
     axis.text = element_text(size = 12),
     axis.title = element_text(size = 13)
   )
+}
 ```
 
 
@@ -3285,6 +3300,8 @@ prettify_terms <- function(old_terms, col_names = cols) {
   return(new_terms)
 }
 
+if (length(predictors) > 0) {
+  
 # Create table
 coef_table <-
   robust_ci %>%
@@ -3296,6 +3313,12 @@ coef_table <-
   mutate(
     term = prettify_terms(term, cols),
     term = factor(term, levels = term)
+  ) %>%
+  # Cup the values to make the figure readable
+  mutate(
+    conf.low = ifelse(conf.high > 50, 50, conf.high),
+    conf.high = ifelse(conf.high > 50, 50, conf.high),
+    estimate = ifelse(estimate > 50, 50, estimate)
   )
 
 # Plot
@@ -3306,12 +3329,13 @@ coef_table %>%
   labs(x = "Odds ratio", y = NULL) +
   guides(color = F) +
   scale_x_continuous(
-    breaks = as.integer(seq(0, max(coef_table$conf.high), length.out = 5))
+    breaks = as.integer(seq(0, max(coef_table$conf.high), length.out = 6))
   ) +
   theme(
     axis.text = element_text(size = 12),
     axis.title = element_text(size = 13)
   )
+}
 ```
 
 
