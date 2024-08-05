@@ -273,7 +273,7 @@ library(tidyverse)
 ```
 
 
-## Configurations
+## Parameters
 
 ```{r}
 # Source outcome-specific configs
@@ -294,7 +294,7 @@ set.seed(1891)
 ```
 
 
-## Parameters
+## Variables
 
 ```{r}
 EXPOSURES_CONTINUOUS <- c(
@@ -2078,6 +2078,7 @@ unwanted_without_gradings <- c(
 
 # Define cols of interest - use grading scores whenever these exist
 unwanted_with_gradings <- c(
+  unwanted_all,
   # Spetzler-Martin grade (size score + eloquent location + venous drainage)
   "is_spetzler_martin_grade_less_than_4", # The grade has lower p-value
   "size_score",
@@ -2177,7 +2178,7 @@ Use step-wise linear regression methods.
 set.seed(33)
 
 # Run forward step-wise
-fsfit <- fs(
+fsfit <- selectiveInference::fs(
   x = X_without_gradings_scaled,
   y = y_without_gradings,
   maxsteps = 2000,
@@ -2186,7 +2187,7 @@ fsfit <- fs(
 )
 
 # Estimate sigma
-sigmahat <- estimateSigma(
+sigmahat <- selectiveInference::estimateSigma(
   x = X_without_gradings_scaled,
   y = y_without_gradings,
   intercept = TRUE,
@@ -2298,6 +2299,10 @@ if (length(out) > 0) {
       ci_hi = exp(out$ci[, 2])
     ) %>%
     arrange(pvalue)
+  
+  # Print
+  robust_ci %>% sable()
+
 } else {
   # Initialize variable
   robust_ci <- tibble()
@@ -2305,9 +2310,6 @@ if (length(out) > 0) {
   # Print 
   print("No variables were selected")
 }
-
-# Print
-robust_ci %>% sable()
 ```
 
 
@@ -2452,6 +2454,10 @@ if (length(out) > 0) {
       ci_hi = exp(out$ci[, 2])
     ) %>%
     arrange(pvalue)
+  
+  # Print
+  robust_ci %>% sable()
+
 } else {
   # Initialize variable
   robust_ci <- tibble()
@@ -2459,9 +2465,6 @@ if (length(out) > 0) {
   # Print 
   print("No variables were selected")
 }
-
-# Print
-robust_ci %>% sable()
 ```
 
 
@@ -2606,6 +2609,10 @@ if (length(out) > 0) {
       ci_hi = exp(out$ci[, 2])
     ) %>%
     arrange(pvalue)
+  
+  # Print
+  robust_ci %>% sable()
+
 } else {
   # Initialize variable
   robust_ci <- tibble()
