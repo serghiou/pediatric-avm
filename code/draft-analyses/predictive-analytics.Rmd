@@ -2286,9 +2286,7 @@ out <- fixedLassoInf(
 
 # Create model table (make this robust to no variable being selected)
 if (length(out) > 0) {
-  # Initialize variable
-  robust_ci <- tibble()
-  
+
   # Create table
   robust_ci <- 
     tibble(
@@ -2304,8 +2302,6 @@ if (length(out) > 0) {
   robust_ci %>% sable()
 
 } else {
-  # Initialize variable
-  robust_ci <- tibble()
   
   # Print 
   print("No variables were selected")
@@ -2343,30 +2339,32 @@ prettify_terms <- function(old_terms, col_names = cols) {
   return(new_terms)
 }
 
-# Create table
-coef_table <-
-  robust_ci %>% 
-  filter(term != "(Intercept)") %>%
-  arrange(desc(odds_ratio)) %>%
-  mutate(
-    term = prettify_terms(term, cols),
-    term = factor(term, levels = term)
-  )
-
-# Plot
-coef_table %>%
-  ggplot(aes(x = odds_ratio, y = term, color = term)) +
-  geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
-  geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
-  labs(x = "Odds ratio", y = NULL) +
-  guides(color = F) +
-  scale_x_continuous(
-    breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
-  ) +
-  theme(
-    axis.text = element_text(size = 12),
-    axis.title = element_text(size = 13)
-  )
+if (length(out) > 0) {
+  # Create table
+  coef_table <-
+    robust_ci %>% 
+    filter(term != "(Intercept)") %>%
+    arrange(desc(odds_ratio)) %>%
+    mutate(
+      term = prettify_terms(term, cols),
+      term = factor(term, levels = term)
+    )
+  
+  # Plot
+  coef_table %>%
+    ggplot(aes(x = odds_ratio, y = term, color = term)) +
+    geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
+    geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+    labs(x = "Odds ratio", y = NULL) +
+    guides(color = F) +
+    scale_x_continuous(
+      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
+    ) +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 13)
+    )
+}
 ```
 
 
@@ -2441,9 +2439,7 @@ out <- fixedLassoInf(
 
 # Create model table (make this robust to no variable being selected)
 if (length(out) > 0) {
-  # Initialize variable
-  robust_ci <- tibble()
-  
+
   # Create table
   robust_ci <- 
     tibble(
@@ -2459,9 +2455,7 @@ if (length(out) > 0) {
   robust_ci %>% sable()
 
 } else {
-  # Initialize variable
-  robust_ci <- tibble()
-  
+
   # Print 
   print("No variables were selected")
 }
@@ -2498,30 +2492,32 @@ prettify_terms <- function(old_terms, col_names = cols) {
   return(new_terms)
 }
 
-# Create table
-coef_table <-
-  robust_ci %>% 
-  filter(term != "(Intercept)") %>%
-  arrange(desc(odds_ratio)) %>%
-  mutate(
-    term = prettify_terms(term, cols),
-    term = factor(term, levels = term)
-  )
-
-# Plot
-coef_table %>%
-  ggplot(aes(x = odds_ratio, y = term, color = term)) +
-  geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
-  geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
-  labs(x = "Odds ratio", y = NULL) +
-  guides(color = F) +
-  scale_x_continuous(
-    breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
-  ) +
-  theme(
-    axis.text = element_text(size = 12),
-    axis.title = element_text(size = 13)
-  )
+if (length(out) > 0) {
+  # Create table
+  coef_table <-
+    robust_ci %>% 
+    filter(term != "(Intercept)") %>%
+    arrange(desc(odds_ratio)) %>%
+    mutate(
+      term = prettify_terms(term, cols),
+      term = factor(term, levels = term)
+    )
+  
+  # Plot
+  coef_table %>%
+    ggplot(aes(x = odds_ratio, y = term, color = term)) +
+    geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
+    geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+    labs(x = "Odds ratio", y = NULL) +
+    guides(color = F) +
+    scale_x_continuous(
+      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
+    ) +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 13)
+    )
+}
 ```
 
 
@@ -2596,9 +2592,7 @@ out <- fixedLassoInf(
 
 # Create model table (make this robust to no variable being selected)
 if (length(out) > 0) {
-  # Initialize variable
-  robust_ci <- tibble()
-  
+
   # Create table
   robust_ci <- 
     tibble(
@@ -2614,9 +2608,7 @@ if (length(out) > 0) {
   robust_ci %>% sable()
 
 } else {
-  # Initialize variable
-  robust_ci <- tibble()
-  
+
   # Print 
   print("No variables were selected")
 }
@@ -2656,30 +2648,32 @@ prettify_terms <- function(old_terms, col_names = cols) {
   return(new_terms)
 }
 
-# Create table
-coef_table <-
-  robust_ci %>% 
-  filter(term != "(Intercept)") %>%
-  arrange(desc(odds_ratio)) %>%
-  mutate(
-    term = prettify_terms(term, cols),
-    term = factor(term, levels = term)
-  )
-
-# Plot
-coef_table %>%
-  ggplot(aes(x = odds_ratio, y = term, color = term)) +
-  geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
-  geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
-  labs(x = "Odds ratio", y = NULL) +
-  guides(color = F) +
-  scale_x_continuous(
-    breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
-  ) +
-  theme(
-    axis.text = element_text(size = 12),
-    axis.title = element_text(size = 13)
-  )
+if (length(out) > 0) {
+  # Create table
+  coef_table <-
+    robust_ci %>% 
+    filter(term != "(Intercept)") %>%
+    arrange(desc(odds_ratio)) %>%
+    mutate(
+      term = prettify_terms(term, cols),
+      term = factor(term, levels = term)
+    )
+  
+  # Plot
+  coef_table %>%
+    ggplot(aes(x = odds_ratio, y = term, color = term)) +
+    geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
+    geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+    labs(x = "Odds ratio", y = NULL) +
+    guides(color = F) +
+    scale_x_continuous(
+      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
+    ) +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 13)
+    )
+}
 ```
 
 
