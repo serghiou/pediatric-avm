@@ -7,6 +7,8 @@ proportion_of_data <- 1
 
 configs <- c(
   "config_is-poor-outcome.R",
+  "config_is-poor-outcome_is_spetzler_martin_grade_less_than_4TRUE.R",
+  "config_is-poor-outcome_is_spetzler_martin_grade_less_than_4FALSE.R",
   "config_is-poor-outcome_haemTRUE.R",
   "config_is-poor-outcome_haemFALSE.R",
   "config_has-complication-major.R",
@@ -16,6 +18,8 @@ configs <- c(
 
 titles <- c(
   "Poor outcome",
+  "Poor outcome - Low grade",
+  "Poor outcome - High grade",
   "Poor outcome - Hemorrhage",
   "Poor outcome - No Hemorrhage",
   "Complications - Major",
@@ -36,6 +40,9 @@ for (i in seq_along(configs)) {
     CONFIG = configs[i],
     TITLE = titles[i]
   )
+  
+  # Print status
+  print(paste("Now computing:", titles[i]))
   
   # Render
   rmarkdown::render(

@@ -388,6 +388,12 @@ if (params$TITLE == "Poor outcome - Hemorrhage") {
 if (params$TITLE == "Poor outcome - No Hemorrhage") {
   patients_ <- patients_ %>% filter(!has_hemorrhage)
 }
+if (params$TITLE == "Poor outcome - High grade") {
+  patients_ <- patients_ %>% filter(spetzler_martin_grade >= 4)
+}
+if (params$TITLE == "Poor outcome - Low grade") {
+  patients_ <- patients_ %>% filter(spetzler_martin_grade < 4)
+}
 ```
 
 
@@ -904,7 +910,7 @@ remove(`Pediatric AVMs`)
 ```
 
 
-## By hemorrhage - table1 (WIP)
+## By hemorrhage - table1
 
 https://cran.r-project.org/web/packages/table1/vignettes/table1-examples.html
 
@@ -1151,76 +1157,78 @@ out_complete %>%
 ## By SM grade high vs. low
 
 ```{r}
-# Define arguments
-interaction_col <- "is_spetzler_martin_grade_less_than_4"
-interaction_col_name <- "Spetzler-Martin grade < 4"
-prefix_true <- "Low grade"
-prefix_false <- "High grade"
-
-# Get all
-out <- list()
-out[[1]] <- compute_descriptive_continuous(
-  use_interaction = F,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = T,
-  prefix = "All"
-)
-out[[2]] <- compute_descriptive_binary(
-  use_interaction = F,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = T,
-  prefix = "All"
-)
-out_all <- bind_rows(out)
-
-# Get with hemorrhage
-out <- list()
-out[[1]] <- compute_descriptive_continuous(
-  use_interaction = T,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = T,
-  prefix = prefix_true
-)
-out[[2]] <- compute_descriptive_binary(
-  use_interaction = T,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = T,
-  prefix = prefix_true
-)
-out_haem <- bind_rows(out)
-
-# Get without hemorrhage
-out <- list()
-out[[1]] <- compute_descriptive_continuous(
-  use_interaction = T,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = F,
-  prefix = prefix_false
-)
-out[[2]] <- compute_descriptive_binary(
-  use_interaction = T,
-  interaction_col = interaction_col,
-  interaction_col_name = interaction_col_name,
-  interaction_col_value = F,
-  prefix = prefix_false
-)
-out_no_haem <- bind_rows(out)
-
-# Synthesize
-out_complete <-
-  out_all %>%
-  left_join(out_haem, by = "keys") %>%
-  left_join(out_no_haem, by = "keys") %>%
-  arrange(`All - P-value`)
-
-# Print
-out_complete %>%
-  sable()
+if (!str_detect(params$TITLE, "grade")) {
+  # Define arguments
+  interaction_col <- "is_spetzler_martin_grade_less_than_4"
+  interaction_col_name <- "Spetzler-Martin grade < 4"
+  prefix_true <- "Low grade"
+  prefix_false <- "High grade"
+  
+  # Get all
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = F,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = "All"
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = F,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = "All"
+  )
+  out_all <- bind_rows(out)
+  
+  # Get with
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = prefix_true
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = prefix_true
+  )
+  out_haem <- bind_rows(out)
+  
+  # Get without
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = F,
+    prefix = prefix_false
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = F,
+    prefix = prefix_false
+  )
+  out_no_haem <- bind_rows(out)
+  
+  # Synthesize
+  out_complete <-
+    out_all %>%
+    left_join(out_haem, by = "keys") %>%
+    left_join(out_no_haem, by = "keys") %>%
+    arrange(`All - P-value`)
+  
+  # Print
+  out_complete %>%
+    sable()
+}
 ```
 
 
@@ -1239,9 +1247,13 @@ cols <- c(
   OUTCOMES
 )
 
-# Remove hemorrhage
+# Remove interaction terms
 if (str_detect(params$TITLE, "Hemorrhage")) {
   cols <- cols[!cols == "has_hemorrhage"]
+}
+if (str_detect(params$TITLE, "grade")) {
+  x <- c("spetzler_martin_grade", "is_spetzler_martin_grade_less_than_4")
+  cols <- cols[!cols %in% x]
 }
   
 # Create new dataframe
@@ -2057,9 +2069,13 @@ unwanted_all <- c(
   "spetzler_martin_grade"
 )
 
-# Remove hemorrhage from the mix
+# Remove interaction terms from the mix
 if (str_detect(params$TITLE, "Hemorrhage")) {
   unwanted_all <- c(unwanted_all, "has_hemorrhage")
+}
+if (str_detect(params$TITLE, "grade")) {
+  x <- c("spetzler_martin_grade", "is_spetzler_martin_grade_less_than_4")
+  unwanted_all <- c(unwanted_all, x)
 }
 
 unwanted_without_gradings <- c(
@@ -3078,17 +3094,19 @@ xtab <- table(
   labels = truth
 )
 
-# Compute
-confusion_matrix <-
-  caret::confusionMatrix(
-    xtab,
-    positive = "Event",
-    prevalence = NULL, # Provide prevalence as a proportion here if you want
-    mode = "sens_spec"
+# Compute confusion matrix - only if the model predicts both events
+if (nlevels(pred) > 1) {
+  confusion_matrix <-
+    caret::confusionMatrix(
+      xtab,
+      positive = "Event",
+      prevalence = NULL, # Provide prevalence as a proportion here if you want
+      mode = "sens_spec"
   )
 
-# Print
-confusion_matrix
+  # Print
+  confusion_matrix
+}
 ```
 
 
@@ -3518,17 +3536,19 @@ xtab <- table(
   labels = truth
 )
 
-# Compute
-confusion_matrix <-
-  caret::confusionMatrix(
-    xtab,
-    positive = "Event",
-    prevalence = NULL, # Provide prevalence as a proportion here if you want
-    mode = "sens_spec"
+# Compute confusion matrix - only if the model predicts both events
+if (nlevels(pred) > 1) {
+  confusion_matrix <-
+    caret::confusionMatrix(
+      xtab,
+      positive = "Event",
+      prevalence = NULL, # Provide prevalence as a proportion here if you want
+      mode = "sens_spec"
   )
 
-# Print
-confusion_matrix
+  # Print
+  confusion_matrix
+}
 ```
 
 
