@@ -1635,7 +1635,7 @@ univariable_adjusted_recoded %>%
 
 # Interaction analysis
 
-## Adjusted - Recoded
+## By hemorrhage
 
 Fit logistic.
 
@@ -1828,6 +1828,211 @@ df %>%
 ```
 
 
+## By SM grade high vs. low
+
+Fit logistic.
+
+```{r}
+# Define columns
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Remove unwanted columns
+unwanted <- c("modified_rankin_score_final")
+cols <- cols[!cols %in% unwanted]
+
+adjustors <- c(
+  "age_at_first_treatment_yrs",
+  "is_male"
+)
+
+# Initialize
+out <- list()
+df <- df_multi
+k <- 1
+
+for (i in seq_along(cols)) {
+  # Do not fit model for variables that we are adjusting for
+  if (cols[i] %in% adjustors) {
+    next
+  }
+
+  # Create formula
+  model <- as.formula(paste(
+    CHOSEN_OUTCOME,
+    "~",
+    "age_at_first_treatment_yrs + is_male +",
+    cols[i],
+    "* is_spetzler_martin_grade_less_than_4",
+    sep = ""
+  ))
+
+  fit <- suppressWarnings(glm(
+    model,
+    data = df,
+    family = binomial()
+  ))
+
+  # Calculate robust standard errors (sandwich)
+  robust_se <- sandwich::vcovHC(fit, type = "HC0")
+  # Compute robust confidence intervals
+  robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+
+  # Summarize model coefficients
+  fit_summary <-
+    robust_ci %>%
+    # broom does not support exponentiation after coeftest so do it manually
+    broom::tidy(conf.int = T) %>%
+    mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+    arrange(term == "(Intercept)", p.value) %>%
+    rename(odds_ratio = estimate, z_value = statistic)
+
+  # Stylize and print
+  stylized <-
+    fit_summary %>%
+    rename(
+      "Predictors" = term,
+      "Odds Ratios (OR)" = odds_ratio,
+      "SE" = std.error,
+      "Z-scores" = z_value,
+      "P-values" = p.value,
+      "CI (low)" = conf.low,
+      "CI (high)" = conf.high,
+    ) %>%
+    mutate(
+      `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+      `SE` = round(`SE`, 2),
+      `CI (low)` = round(`CI (low)`, 2),
+      `CI (high)` = round(`CI (high)`, 2),
+      `P-values` = round(`P-values`, 3),
+    )
+
+  out[[k]] <- stylized
+  k <- k + 1
+}
+```
+
+
+Print all results results.
+
+```{r}
+# Define values
+unwanted <- c(
+  "is_maleTRUE",
+  "age_at_first_treatment_yrs",
+  "(Intercept)",
+  "is_spetzler_martin_grade_less_than_4TRUE"
+)
+
+# Initialize objects
+isolated_values <- list()
+
+# Get main and interaction effects
+for (i in seq_along(out)) {
+  # Get data
+  result <- out[[i]]
+
+  # Get all main effects of interest
+  main_effects <-
+    result %>%
+    filter(!Predictors %in% unwanted) %>%
+    filter(!str_detect(Predictors, ":")) %>%
+    select(-"SE", -"Z-scores")
+
+  # Get the interaction effects
+  interaction_effects <-
+    result %>%
+    filter(!Predictors %in% unwanted) %>%
+    filter(str_detect(Predictors, ":")) %>%
+    mutate(Predictors = str_extract(Predictors, "^[^:]+")) %>%
+    select(-"SE", -"Z-scores") %>%
+    rename_with(~ paste("Interaction -", .), -Predictors)
+
+  isolated_values[[i]] <-
+    main_effects %>%
+    left_join(interaction_effects, by = "Predictors")
+}
+```
+
+
+Create and print table
+
+```{r}
+# Create table
+univariable_adjusted_recoded_interactions <-
+  isolated_values %>%
+  bind_rows() %>%
+  arrange(`Interaction - P-values`)
+
+# Print
+univariable_adjusted_recoded_interactions %>%
+  sable()
+```
+
+
+Eloquence.
+
+```{r}
+df %>%
+  count(
+    is_spetzler_martin_grade_less_than_4,
+    is_eloquent_location,
+    !!sym(CHOSEN_OUTCOME)
+  ) %>%
+  drop_na() %>%
+  arrange(is_spetzler_martin_grade_less_than_4, is_eloquent_location) %>%
+  group_by(is_spetzler_martin_grade_less_than_4, is_eloquent_location) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+
+Deficit.
+
+```{r}
+df %>%
+  count(
+    is_spetzler_martin_grade_less_than_4,
+    has_deficit,
+    !!sym(CHOSEN_OUTCOME)
+  ) %>%
+  drop_na() %>%
+  arrange(is_spetzler_martin_grade_less_than_4, has_deficit) %>%
+  group_by(is_spetzler_martin_grade_less_than_4, has_deficit) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+
+Seizures.
+
+```{r}
+df %>%
+  count(
+    is_spetzler_martin_grade_less_than_4,
+    has_seizures,
+    !!sym(CHOSEN_OUTCOME)
+  ) %>%
+  drop_na() %>%
+  arrange(is_spetzler_martin_grade_less_than_4, has_seizures) %>%
+  group_by(is_spetzler_martin_grade_less_than_4, has_seizures) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+
 ------------------------------------------------------------------------
 
 # Selective inference
@@ -1837,6 +2042,7 @@ Read the following guides:
 - [How to use glmnet](https://glmnet.stanford.edu/articles/glmnet.html)
 
 - [Selective inference using forward selection](https://stephens999.github.io/misc/selective_inference_toy.html)
+
 
 ## Setup
 
@@ -2077,20 +2283,88 @@ out <- fixedLassoInf(
   sigma = gsigmahat
 )
 
-# Print model (make this robust to no variable being selected)
+# Create model table (make this robust to no variable being selected)
 if (length(out) > 0) {
-  tibble(
-    names = names(out$vars),
-    odds_ratio = exp(out$coef0),
-    pvalue = out$pv,
-    ci_lo = exp(out$ci[, 1]),
-    ci_hi = exp(out$ci[, 2])
-  ) %>%
-    arrange(pvalue) %>%
-    sable()
+  # Initialize variable
+  robust_ci <- tibble()
+  
+  # Create table
+  robust_ci <- 
+    tibble(
+      term = names(out$vars),
+      odds_ratio = exp(out$coef0),
+      pvalue = out$pv,
+      ci_lo = exp(out$ci[, 1]),
+      ci_hi = exp(out$ci[, 2])
+    ) %>%
+    arrange(pvalue)
 } else {
+  # Initialize variable
+  robust_ci <- tibble()
+  
+  # Print 
   print("No variables were selected")
 }
+
+# Print
+robust_ci %>% sable()
+```
+
+
+Plot the coefficients with their confidence intervals.
+
+```{r, fig.height=4, fig.width=6}
+# Collect all columns
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+)
+
+# Define function to replace ugly with pretty names
+prettify_terms <- function(old_terms, col_names = cols) {
+  
+  # Extract factor terms
+  factor_terms <- str_extract(old_terms, "[A-Z].*")
+  
+  # Extract new terms
+  base_terms <- str_replace(old_terms, "[A-Z].*$", "")
+  new_terms <- map_chr(base_terms, ~ names(col_names[col_names == .x]))
+  
+  # Add the TRUE label
+  new_terms <- ifelse(
+    is.na(factor_terms),
+    new_terms,
+    paste(new_terms, factor_terms, sep = " - ")
+  )
+  
+  return(new_terms)
+}
+
+# Create table
+coef_table <-
+  robust_ci %>% 
+  filter(term != "(Intercept)") %>%
+  arrange(desc(odds_ratio)) %>%
+  mutate(
+    term = prettify_terms(term, cols),
+    term = factor(term, levels = term)
+  )
+
+# Plot
+coef_table %>%
+  ggplot(aes(x = odds_ratio, y = term, color = term)) +
+  geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
+  geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+  labs(x = "Odds ratio", y = NULL) +
+  guides(color = F) +
+  scale_x_continuous(
+    breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
+  ) +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13)
+  )
 ```
 
 
@@ -2163,20 +2437,88 @@ out <- fixedLassoInf(
   sigma = gsigmahat
 )
 
-# Print model (make this robust to no variable being selected)
+# Create model table (make this robust to no variable being selected)
 if (length(out) > 0) {
-  tibble(
-    names = names(out$vars),
-    odds_ratio = exp(out$coef0),
-    pvalue = out$pv,
-    ci_lo = exp(out$ci[, 1]),
-    ci_hi = exp(out$ci[, 2])
-  ) %>%
-    arrange(pvalue) %>%
-    sable()
+  # Initialize variable
+  robust_ci <- tibble()
+  
+  # Create table
+  robust_ci <- 
+    tibble(
+      term = names(out$vars),
+      odds_ratio = exp(out$coef0),
+      pvalue = out$pv,
+      ci_lo = exp(out$ci[, 1]),
+      ci_hi = exp(out$ci[, 2])
+    ) %>%
+    arrange(pvalue)
 } else {
+  # Initialize variable
+  robust_ci <- tibble()
+  
+  # Print 
   print("No variables were selected")
 }
+
+# Print
+robust_ci %>% sable()
+```
+
+
+Plot the coefficients with their confidence intervals.
+
+```{r, fig.height=4, fig.width=6}
+# Collect all columns
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+)
+
+# Define function to replace ugly with pretty names
+prettify_terms <- function(old_terms, col_names = cols) {
+  
+  # Extract factor terms
+  factor_terms <- str_extract(old_terms, "[A-Z].*")
+  
+  # Extract new terms
+  base_terms <- str_replace(old_terms, "[A-Z].*$", "")
+  new_terms <- map_chr(base_terms, ~ names(col_names[col_names == .x]))
+  
+  # Add the TRUE label
+  new_terms <- ifelse(
+    is.na(factor_terms),
+    new_terms,
+    paste(new_terms, factor_terms, sep = " - ")
+  )
+  
+  return(new_terms)
+}
+
+# Create table
+coef_table <-
+  robust_ci %>% 
+  filter(term != "(Intercept)") %>%
+  arrange(desc(odds_ratio)) %>%
+  mutate(
+    term = prettify_terms(term, cols),
+    term = factor(term, levels = term)
+  )
+
+# Plot
+coef_table %>%
+  ggplot(aes(x = odds_ratio, y = term, color = term)) +
+  geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
+  geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+  labs(x = "Odds ratio", y = NULL) +
+  guides(color = F) +
+  scale_x_continuous(
+    breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
+  ) +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13)
+  )
 ```
 
 
@@ -2249,22 +2591,89 @@ out <- fixedLassoInf(
   sigma = gsigmahat
 )
 
-# Print model (make this robust to no variable being selected)
+# Create model table (make this robust to no variable being selected)
 if (length(out) > 0) {
-  tibble(
-    names = names(out$vars),
-    odds_ratio = exp(out$coef0),
-    pvalue = out$pv,
-    ci_lo = exp(out$ci[, 1]),
-    ci_hi = exp(out$ci[, 2])
-  ) %>%
-    arrange(pvalue) %>%
-    sable()
+  # Initialize variable
+  robust_ci <- tibble()
+  
+  # Create table
+  robust_ci <- 
+    tibble(
+      term = names(out$vars),
+      odds_ratio = exp(out$coef0),
+      pvalue = out$pv,
+      ci_lo = exp(out$ci[, 1]),
+      ci_hi = exp(out$ci[, 2])
+    ) %>%
+    arrange(pvalue)
 } else {
+  # Initialize variable
+  robust_ci <- tibble()
+  
+  # Print 
   print("No variables were selected")
 }
+
+# Print
+robust_ci %>% sable()
 ```
 
+
+Plot the coefficients with their confidence intervals.
+
+```{r, fig.height=4, fig.width=6}
+# Collect all columns
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+)
+
+# Define function to replace ugly with pretty names
+prettify_terms <- function(old_terms, col_names = cols) {
+  
+  # Extract factor terms
+  factor_terms <- str_extract(old_terms, "[A-Z].*")
+  
+  # Extract new terms
+  base_terms <- str_replace(old_terms, "[A-Z].*$", "")
+  new_terms <- map_chr(base_terms, ~ names(col_names[col_names == .x]))
+  
+  # Add the TRUE label
+  new_terms <- ifelse(
+    is.na(factor_terms),
+    new_terms,
+    paste(new_terms, factor_terms, sep = " - ")
+  )
+  
+  return(new_terms)
+}
+
+# Create table
+coef_table <-
+  robust_ci %>% 
+  filter(term != "(Intercept)") %>%
+  arrange(desc(odds_ratio)) %>%
+  mutate(
+    term = prettify_terms(term, cols),
+    term = factor(term, levels = term)
+  )
+
+# Plot
+coef_table %>%
+  ggplot(aes(x = odds_ratio, y = term, color = term)) +
+  geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
+  geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+  labs(x = "Odds ratio", y = NULL) +
+  guides(color = F) +
+  scale_x_continuous(
+    breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 5))
+  ) +
+  theme(
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 13)
+  )
+```
 
 
 ------------------------------------------------------------------------
@@ -2417,28 +2826,60 @@ multivariable_pvalue %>% sable()
 Plot the coefficients with their confidence intervals.
 
 ```{r, fig.height=4, fig.width=6}
-robust_ci %>%
+# Collect all columns
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+)
+
+# Define function to replace ugly with pretty names
+prettify_terms <- function(old_terms, col_names = cols) {
+  
+  # Extract factor terms
+  factor_terms <- str_extract(old_terms, "[A-Z].*")
+  
+  # Extract new terms
+  base_terms <- str_replace(old_terms, "[A-Z].*$", "")
+  new_terms <- map_chr(base_terms, ~ names(col_names[col_names == .x]))
+  
+  # Add the TRUE label
+  new_terms <- ifelse(
+    is.na(factor_terms),
+    new_terms,
+    paste(new_terms, factor_terms, sep = " - ")
+  )
+  
+  return(new_terms)
+}
+
+# Create table
+coef_table <-
+  robust_ci %>%
   # broom does not support exponentiation after coeftest so do it manually
   broom::tidy(exponentiate = F, conf.int = T) %>%
   mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
   filter(term != "(Intercept)") %>%
   arrange(desc(estimate)) %>%
-  mutate(term = factor(term, levels = term)) %>%
+  mutate(
+    term = prettify_terms(term, cols),
+    term = factor(term, levels = term)
+  )
+
+# Plot
+coef_table %>%
   ggplot(aes(x = estimate, y = term, color = term)) +
   geom_pointrange(aes(xmin = conf.low, xmax = conf.high)) +
   geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
   labs(x = "Odds ratio", y = NULL) +
   guides(color = F) +
+  scale_x_continuous(
+    breaks = as.integer(seq(0, max(coef_table$conf.high), length.out = 5))
+  ) +
   theme(
     axis.text = element_text(size = 12),
     axis.title = element_text(size = 13)
   )
-
-# Dotwhisker was not giving me the correct plot
-# dotwhisker::dwplot(
-#   vline = geom_vline(xintercept = 1, linetype = 2, alpha =  0.5),
-#   show_intercept = F
-# )
 ```
 
 
@@ -2816,28 +3257,60 @@ multivariable_pvalue %>% sable()
 Plot the coefficients with their confidence intervals.
 
 ```{r, fig.height=4, fig.width=6}
-robust_ci %>%
+# Collect all columns
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+)
+
+# Define function to replace ugly with pretty names
+prettify_terms <- function(old_terms, col_names = cols) {
+  
+  # Extract factor terms
+  factor_terms <- str_extract(old_terms, "[A-Z].*")
+  
+  # Extract new terms
+  base_terms <- str_replace(old_terms, "[A-Z].*$", "")
+  new_terms <- map_chr(base_terms, ~ names(col_names[col_names == .x]))
+  
+  # Add the TRUE label
+  new_terms <- ifelse(
+    is.na(factor_terms),
+    new_terms,
+    paste(new_terms, factor_terms, sep = " - ")
+  )
+  
+  return(new_terms)
+}
+
+# Create table
+coef_table <-
+  robust_ci %>%
   # broom does not support exponentiation after coeftest so do it manually
   broom::tidy(exponentiate = F, conf.int = T) %>%
   mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
   filter(term != "(Intercept)") %>%
   arrange(desc(estimate)) %>%
-  mutate(term = factor(term, levels = term)) %>%
+  mutate(
+    term = prettify_terms(term, cols),
+    term = factor(term, levels = term)
+  )
+
+# Plot
+coef_table %>%
   ggplot(aes(x = estimate, y = term, color = term)) +
   geom_pointrange(aes(xmin = conf.low, xmax = conf.high)) +
   geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
   labs(x = "Odds ratio", y = NULL) +
   guides(color = F) +
+  scale_x_continuous(
+    breaks = as.integer(seq(0, max(coef_table$conf.high), length.out = 5))
+  ) +
   theme(
     axis.text = element_text(size = 12),
     axis.title = element_text(size = 13)
   )
-
-# Dotwhisker was not giving me the correct plot
-# dotwhisker::dwplot(
-#   vline = geom_vline(xintercept = 1, linetype = 2, alpha =  0.5),
-#   show_intercept = F
-# )
 ```
 
 
