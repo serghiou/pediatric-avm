@@ -263,6 +263,7 @@ original_theme <- theme_set(my_theme)
 # Load packages
 library(glmnet)
 library(magrittr)
+library(patchwork)
 library(selectiveInference)
 library(tidyverse)
 
@@ -673,6 +674,83 @@ df_long %>%
     strip.text = element_text(size = 11)
   )
 ```
+
+
+## Specialty
+
+### SM grade vs. complications
+
+```{r}
+# Rename
+complications <- c(
+  has_complication_minor = "Minor",
+  has_complication_major = "Major"
+)
+
+# Create table for plotting
+t <- 
+  df_uni %>% 
+  filter(is_eligible) %>% 
+  select(
+    patient_id,
+    spetzler_martin_grade,
+    has_complication_minor,
+    has_complication_major
+  ) %>% 
+  pivot_longer(starts_with("has_complication")) %>% 
+  group_by(spetzler_martin_grade, name) %>% 
+  summarize(
+    num_patients = sum(value, na.rm = T)
+  ) %>% 
+  group_by(name) %>% 
+  mutate(pct_patients = num_patients / sum(num_patients))
+
+# Create figure
+plots$sm_grade_vs_complications_bar_chart <- 
+  t %>%
+  mutate(name = factor(name, names(complications), complications)) %>% 
+  ggplot(aes(
+    x = spetzler_martin_grade,
+    y = pct_patients,
+    color = name,
+    fill = name)
+  ) +
+  geom_col(
+    position = position_dodge(width = 0.8),
+    width = 0.7
+  ) +
+  geom_label(
+    aes(label = num_patients),
+    position = position_dodge(width = 0.8),
+    vjust = -0.2,
+    size = 3,
+    fill = "white",
+    label.size = NA,  # Removes the label border
+    show.legend = FALSE
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.1))
+  ) +
+  scale_fill_manual(values = c("Minor" = "#00BFC4", "Major" = "#F8766D")) +
+  scale_color_manual(values = c("Minor" = "#00BFC4", "Major" = "#F8766D")) +
+  labs(
+    x = "Spetzler-Martin Grade",
+    y = "Patients (%)",
+    fill = "Complications",
+    color = "Complications"
+  ) +
+  theme(
+    legend.position = c(0.3, 0.95),
+    legend.justification = c("right", "top")
+  )
+  
+# Plot
+plots$sm_grade_vs_complications_bar_chart
+```
+
+
+
 
 ------------------------------------------------------------------------
 
@@ -2369,19 +2447,49 @@ if (length(out) > 0) {
     mutate(ci_hi = ifelse(ci_hi > 50, 50, ci_hi))
   
   # Plot
-  coef_table %>%
+  odds_ratios_plot <-
+    coef_table %>%
     ggplot(aes(x = odds_ratio, y = term, color = term)) +
-    geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
+    geom_point() +
+    geom_errorbar(aes(xmin = ci_lo, xmax = ci_hi), width = 0.1) +
     geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
-    labs(x = "Odds ratio", y = NULL) +
-    guides(color = F) +
+    labs(x = "Odds Ratio", y = NULL) +
+    guides(color = FALSE) +
     scale_x_continuous(
-      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 6))
+      trans = "log2",
+      breaks = scales::trans_breaks("log2", function(x) 2^x),
+      labels = function(x) formatC(x,format = "g")
+      # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
     ) +
     theme(
       axis.text = element_text(size = 12),
-      axis.title = element_text(size = 13)
+      axis.title = element_text(size = 13),
+      plot.margin = unit(c(1, 0, 1, 0), "lines")  # Reduce right margin
     )
+  
+  pvalues_table_plot <- 
+    coef_table %>% 
+    mutate(pvalue = formatC(pvalue, digits = 2, format = "fg")) %>% 
+    ggplot(aes(x = 1, y = term)) +
+    geom_text(aes(label = pvalue), hjust = 0, size = 4) +
+    scale_y_discrete(limits = levels(coef_table$term)) +
+    theme_void() +
+    ggtitle("P-value") +
+    theme(
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      plot.margin = unit(c(1, 0, 1, 0), "lines"),  # Reduce left margin
+      plot.title = element_text(hjust = 0.75, face = "bold")
+    )
+  
+  plots$odds_ratios_all_predictors <-
+    odds_ratios_plot +
+    plot_spacer() +
+    pvalues_table_plot + 
+    plot_layout(ncol = 3, widths = c(1, -0.19, 0.35))
+  
+  # Plot
+  plots$odds_ratios_all_predictors
 }
 ```
 
@@ -2524,19 +2632,49 @@ if (length(out) > 0) {
     mutate(ci_hi = ifelse(ci_hi > 50, 50, ci_hi))
   
   # Plot
-  coef_table %>%
+  odds_ratios_plot <-
+    coef_table %>%
     ggplot(aes(x = odds_ratio, y = term, color = term)) +
-    geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
+    geom_point() +
+    geom_errorbar(aes(xmin = ci_lo, xmax = ci_hi), width = 0.1) +
     geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
-    labs(x = "Odds ratio", y = NULL) +
-    guides(color = F) +
+    labs(x = "Odds Ratio", y = NULL) +
+    guides(color = FALSE) +
     scale_x_continuous(
-      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 6))
+      trans = "log2",
+      breaks = scales::trans_breaks("log2", function(x) 2^x),
+      labels = function(x) formatC(x,format = "g")
+      # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
     ) +
     theme(
       axis.text = element_text(size = 12),
-      axis.title = element_text(size = 13)
+      axis.title = element_text(size = 13),
+      plot.margin = unit(c(1, 0, 1, 0), "lines")  # Reduce right margin
     )
+  
+  pvalues_table_plot <- 
+    coef_table %>% 
+    mutate(pvalue = formatC(pvalue, digits = 2, format = "fg")) %>% 
+    ggplot(aes(x = 1, y = term)) +
+    geom_text(aes(label = pvalue), hjust = 0, size = 4) +
+    scale_y_discrete(limits = levels(coef_table$term)) +
+    theme_void() +
+    ggtitle("P-value") +
+    theme(
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      plot.margin = unit(c(1, 0, 1, 0), "lines"),  # Reduce left margin
+      plot.title = element_text(hjust = 0.75, face = "bold")
+    )
+  
+  plots$odds_ratios_with_components <-
+    odds_ratios_plot +
+    plot_spacer() +
+    pvalues_table_plot + 
+    plot_layout(ncol = 3, widths = c(1, -0.19, 0.35))
+  
+  # Plot
+  plots$odds_ratios_with_components
 }
 ```
 
@@ -2682,19 +2820,49 @@ if (length(out) > 0) {
     mutate(ci_hi = ifelse(ci_hi > 50, 50, ci_hi))
   
   # Plot
-  coef_table %>%
+  odds_ratios_plot <-
+    coef_table %>%
     ggplot(aes(x = odds_ratio, y = term, color = term)) +
-    geom_pointrange(aes(xmin = ci_lo, xmax = ci_hi)) +
+    geom_point() +
+    geom_errorbar(aes(xmin = ci_lo, xmax = ci_hi), width = 0.1) +
     geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
-    labs(x = "Odds ratio", y = NULL) +
-    guides(color = F) +
+    labs(x = "Odds Ratio", y = NULL) +
+    guides(color = FALSE) +
     scale_x_continuous(
-      breaks = as.integer(seq(0, max(coef_table$ci_hi), length.out = 6))
+      trans = "log2",
+      breaks = scales::trans_breaks("log2", function(x) 2^x),
+      labels = function(x) formatC(x,format = "g")
+      # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
     ) +
     theme(
       axis.text = element_text(size = 12),
-      axis.title = element_text(size = 13)
+      axis.title = element_text(size = 13),
+      plot.margin = unit(c(1, 0, 1, 0), "lines")  # Reduce right margin
     )
+  
+  pvalues_table_plot <- 
+    coef_table %>% 
+    mutate(pvalue = formatC(pvalue, digits = 2, format = "fg")) %>% 
+    ggplot(aes(x = 1, y = term)) +
+    geom_text(aes(label = pvalue), hjust = 0, size = 4) +
+    scale_y_discrete(limits = levels(coef_table$term)) +
+    theme_void() +
+    ggtitle("P-value") +
+    theme(
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      plot.margin = unit(c(1, 0, 1, 0), "lines"),  # Reduce left margin
+      plot.title = element_text(hjust = 0.75, face = "bold")
+    )
+  
+  plots$odds_ratios_without_components <-
+    odds_ratios_plot +
+    plot_spacer() +
+    pvalues_table_plot + 
+    plot_layout(ncol = 3, widths = c(1, -0.19, 0.35))
+  
+  # Plot
+  plots$odds_ratios_without_components
 }
 ```
 
@@ -4134,13 +4302,44 @@ Write all figures.
 
 ```{r}
 # Save
-# ggsave(
-#   file.path(pdf_folder, "histogram_num_days.pdf"),
-#   plot = plots$histogram_num_days,
-#   width = 6,
-#   height = 6
-# )
+ggsave(
+  file.path(pdf_folder, "sm_grade_vs_complications_bar_chart.pdf"),
+  plot = plots$sm_grade_vs_complications_bar_chart,
+  width = 6,
+  height = 6
+)
 ```
+
+```{r}
+# Save
+ggsave(
+  file.path(pdf_folder, "odds_ratios_all_predictors.pdf"),
+  plot = plots$odds_ratios_all_predictors,
+  width = 6,
+  height = 6
+)
+```
+
+```{r}
+# Save
+ggsave(
+  file.path(pdf_folder, "odds_ratios_with_components.pdf"),
+  plot = plots$odds_ratios_with_components,
+  width = 6,
+  height = 6
+)
+```
+
+```{r}
+# Save
+ggsave(
+  file.path(pdf_folder, "odds_ratios_without_components.pdf"),
+  plot = plots$odds_ratios_without_components,
+  width = 6,
+  height = 6
+)
+```
+
 
 ```{r}
 # # Start graphic device
