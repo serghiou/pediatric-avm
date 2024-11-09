@@ -2500,7 +2500,7 @@ if (length(out) > 0) {
     scale_x_continuous(
       trans = "log2",
       breaks = scales::trans_breaks("log2", function(x) 2^x),
-      labels = function(x) formatC(x,format = "g")
+      labels = function(x) formatC(x, format = "g")
       # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
     ) +
     theme(
@@ -2511,7 +2511,8 @@ if (length(out) > 0) {
   
   pvalues_table_plot <- 
     coef_table %>% 
-    mutate(pvalue = formatC(pvalue, digits = 2, format = "fg")) %>% 
+    mutate(pvalue = 
+             formatC(pvalue, digits = 2, format = "fg", drop0trailing = F)) %>% 
     ggplot(aes(x = 1, y = term)) +
     geom_text(aes(label = pvalue), hjust = 0, size = 4) +
     scale_y_discrete(limits = levels(coef_table$term)) +
@@ -2632,7 +2633,7 @@ if (length(out) > 0) {
 
 Plot the coefficients with their confidence intervals.
 
-```{r, fig.height=4, fig.width=6}
+```{r, fig.height=4, fig.width=8}
 # Collect all columns
 cols <- c(
   EXPOSURES_CONTINUOUS,
@@ -2696,7 +2697,8 @@ if (length(out) > 0) {
   
   pvalues_table_plot <- 
     coef_table %>% 
-    mutate(pvalue = formatC(pvalue, digits = 2, format = "fg")) %>% 
+    mutate(pvalue = 
+             formatC(pvalue, digits = 2, format = "fg", drop0trailing = F)) %>% 
     ggplot(aes(x = 1, y = term)) +
     geom_text(aes(label = pvalue), hjust = 0, size = 4) +
     scale_y_discrete(limits = levels(coef_table$term)) +
@@ -2820,7 +2822,7 @@ robust_ci %>% sable()
 
 Plot the coefficients with their confidence intervals.
 
-```{r, fig.height=4, fig.width=6}
+```{r, fig.height=4, fig.width=8}
 # Collect all columns
 cols <- c(
   EXPOSURES_CONTINUOUS,
@@ -2884,7 +2886,8 @@ if (length(out) > 0) {
   
   pvalues_table_plot <- 
     coef_table %>% 
-    mutate(pvalue = formatC(pvalue, digits = 2, format = "fg")) %>% 
+    mutate(pvalue = 
+             formatC(pvalue, digits = 2, format = "fg", drop0trailing = F)) %>% 
     ggplot(aes(x = 1, y = term)) +
     geom_text(aes(label = pvalue), hjust = 0, size = 4) +
     scale_y_discrete(limits = levels(coef_table$term)) +
@@ -3012,7 +3015,7 @@ if (any(colnames(X) %in% "is_surgeryTRUE")) {
 
 Plot the coefficients with their confidence intervals.
 
-```{r, fig.height=4, fig.width=6}
+```{r, fig.height=4, fig.width=8}
 # Collect all columns
 cols <- c(
   EXPOSURES_CONTINUOUS,
@@ -3101,7 +3104,7 @@ if (length(out) > 0) {
 ```
 
 
-## LASSO - without componenets - without surgery
+## LASSO - without components - without surgery
 
 - Use LASSO logistic regression based on previous gradings
 - Exclude surgery from the mix because it's too predictive
@@ -3204,7 +3207,7 @@ if (any(colnames(X) %in% "is_surgeryTRUE")) {
 
 Plot the coefficients with their confidence intervals.
 
-```{r, fig.height=4, fig.width=6}
+```{r, fig.height=4, fig.width=8}
 # Collect all columns
 cols <- c(
   EXPOSURES_CONTINUOUS,
@@ -4730,7 +4733,7 @@ Write all figures.
 ggsave(
   file.path(pdf_folder, "sm_grade_vs_complications_bar_chart.pdf"),
   plot = plots$sm_grade_vs_complications_bar_chart,
-  width = 6,
+  width = 8,
   height = 6
 )
 ```
@@ -4740,7 +4743,7 @@ ggsave(
 ggsave(
   file.path(pdf_folder, "odds_ratios_all_predictors.pdf"),
   plot = plots$odds_ratios_all_predictors,
-  width = 6,
+  width = 8,
   height = 6
 )
 ```
@@ -4750,7 +4753,7 @@ ggsave(
 ggsave(
   file.path(pdf_folder, "odds_ratios_with_components.pdf"),
   plot = plots$odds_ratios_with_components,
-  width = 6,
+  width = 8,
   height = 6
 )
 ```
@@ -4760,29 +4763,33 @@ ggsave(
 ggsave(
   file.path(pdf_folder, "odds_ratios_without_components.pdf"),
   plot = plots$odds_ratios_without_components,
-  width = 6,
+  width = 8,
   height = 6
 )
 ```
 
 ```{r}
 # Save
-ggsave(
-  file.path(pdf_folder, "odds_ratios_with_components_no_surgery.pdf"),
-  plot = plots$odds_ratios_with_components_no_surgery,
-  width = 6,
-  height = 6
-)
+if (with(plots, exists("odds_ratios_with_components_no_surgery"))) {
+  ggsave(
+    file.path(pdf_folder, "odds_ratios_with_components_no_surgery.pdf"),
+    plot = plots$odds_ratios_with_components_no_surgery,
+    width = 8,
+    height = 6
+  )
+}
 ```
 
 ```{r}
 # Save
-ggsave(
-  file.path(pdf_folder, "odds_ratios_without_components_no_surgery.pdf"),
-  plot = plots$odds_ratios_without_components_no_surgery,
-  width = 6,
-  height = 6
-)
+if (with(plots, exists("odds_ratios_without_components_no_surgery"))) {
+  ggsave(
+    file.path(pdf_folder, "odds_ratios_without_components_no_surgery.pdf"),
+    plot = plots$odds_ratios_without_components_no_surgery,
+    width = 8,
+    height = 6
+  )
+}
 ```
 
 ```{r}
