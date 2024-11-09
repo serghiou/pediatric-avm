@@ -750,8 +750,6 @@ plots$sm_grade_vs_complications_bar_chart
 ```
 
 
-
-
 ------------------------------------------------------------------------
 
 # Descriptive statistics
@@ -1436,7 +1434,7 @@ fit_model <- function(
 
 ## Unadjusted - Original
 
-Fit logistic.
+Fit logistic with no adjustments. Use original feature definitions.
 
 ```{r}
 # Define cols
@@ -1465,7 +1463,9 @@ univariable_unadjusted %>%
 
 ## Adjusted - Original
 
-Fit logistic.
+- Fit logistic
+- Adjust for age at first treatment and sex
+- Use original feature definitions
 
 ```{r}
 cols <- unname(c(
@@ -1552,7 +1552,8 @@ univariable_adjusted %>%
 
 ## Unadjusted - Recoded
 
-Fit logistic.
+- Fit logistic with no adjustments
+- Use the recoded feature definitions (less levels for max statistical power)
 
 ```{r}
 # Define columns
@@ -1634,7 +1635,9 @@ univariable_unadjusted_recoded %>%
 
 ## Adjusted - Recoded
 
-Fit logistic.
+- Fit logistic with no adjustments
+- Adjust for age at first treatment and sex
+- Use the recoded feature definitions (less levels for max statistical power)
 
 ```{r}
 # Define columns
@@ -2215,19 +2218,19 @@ cols_without_gradings <- cols[!cols %in% unwanted_without_gradings]
 # Create df of interest
 df_all <-
   # Use the non-recoded dataset
-  df_uni %>%
+  df_multi %>%
   dplyr::select(all_of(cols_all)) %>%
   drop_na()
 
 df_with_gradings <-
   # Use the non-recoded dataset
-  df_uni %>%
+  df_multi %>%
   dplyr::select(all_of(cols_with_gradings)) %>%
   drop_na()
 
 df_no_scores <-
   # Use the non-recoded dataset
-  df_uni %>%
+  df_multi %>%
   dplyr::select(all_of(cols_without_gradings)) %>%
   drop_na()
 
@@ -2235,28 +2238,67 @@ df_no_scores <-
 frla <- as.formula(paste(CHOSEN_OUTCOME, " ~ . - 1"))
 
 # Create matrices with all variables
-X_all <- model.matrix(frla, df_all)
+# (remove falsely created FALSE columns)
+X_ <- model.matrix(frla, df_all)
+X_all <- X_[, !grepl("FALSE$", colnames(X_))]
 y_all <- df_all %>%
   pull(CHOSEN_OUTCOME) %>%
   as.numeric()
 
 # Create matrices with scores
-X_with_gradings <- model.matrix(frla, df_with_gradings)
+X_ <- model.matrix(frla, df_with_gradings)
+X_with_gradings <- X_[, !grepl("FALSE$", colnames(X_))]
 y_with_gradings <- df_with_gradings %>%
   pull(CHOSEN_OUTCOME) %>%
   as.numeric()
 
 # Create matrices with score components
-X_without_gradings <- model.matrix(frla, df_no_scores)
+X_ <- model.matrix(frla, df_no_scores)
+X_without_gradings <- X_[, !grepl("FALSE$", colnames(X_))]
 y_without_gradings <- df_no_scores %>%
   pull(CHOSEN_OUTCOME) %>%
   as.numeric()
 
+
+# Remove duplicate columns
+# Define priority pairs (keep first, remove second)
+priority_pairs <- list(
+  c("is_maleTRUE", "procedure_combinationsS")
+  # Add more pairs as needed
+)
+
+# Remove lower priority columns when both exist
+for (pair in priority_pairs) {
+  if(all(pair %in% colnames(X_all))) {
+    cols_ <- colnames(X_all)
+    X_all <- X_all[, !cols_ %in% pair[2]]
+  }
+  if(all(pair %in% colnames(X_with_gradings))) {
+    cols_ <- colnames(X_with_gradings)
+    X_with_gradings <- X_with_gradings[, !cols_ %in% pair[2]]
+  }
+  if(all(pair %in% colnames(X_without_gradings))) {
+    cols_ <- colnames(X_without_gradings)
+    X_without_gradings <- X_without_gradings[, !cols_ %in% pair[2]]
+  }
+}
+
+
 # X should be centered for LASSO (necessary for glmnet)
 # (scale = FALSE as this is done by the standardization step in glmnet)
-X_all_scaled <- scale(X_all, center = T, scale = F)
-X_with_gradings_scaled <- scale(X_with_gradings, center = T, scale = F)
-X_without_gradings_scaled <- scale(X_without_gradings, center = T, scale = F)
+# whe
+center_values <- function(X) {
+  # Identify binary columns (those with only 0s and 1s)
+  binary_cols <- apply(X, 2, function(x) all(x %in% c(0, 1)))
+  # Center but do not scale - avoid centering one-hot encoded vectors
+  X[, !binary_cols] <- scale(X[, !binary_cols], center = T, scale = F)
+  # Return
+  return(X)
+}
+
+X_all_centered <- center_values(X_all)
+X_with_gradings_centered <- center_values(X_with_gradings)
+X_without_gradings_centered <- center_values(X_without_gradings)
 
 # See the names of X to match column numbers to column names later on
 colnames(X_without_gradings_scaled)
@@ -2273,7 +2315,7 @@ set.seed(33)
 
 # Run forward step-wise
 fsfit <- selectiveInference::fs(
-  x = X_without_gradings_scaled,
+  x = X_without_gradings_centered,
   y = y_without_gradings,
   maxsteps = 2000,
   intercept = TRUE,
@@ -2282,7 +2324,7 @@ fsfit <- selectiveInference::fs(
 
 # Estimate sigma
 sigmahat <- selectiveInference::estimateSigma(
-  x = X_without_gradings_scaled,
+  x = X_without_gradings_centered,
   y = y_without_gradings,
   intercept = TRUE,
   standardize = FALSE
@@ -2318,7 +2360,7 @@ Use LASSO logistic regression using all available variables.
 set.seed(141845)
 
 # Define values
-X <- X_all
+X <- X_all_centered
 y <- y_all
 
 # Perform cross-validation
@@ -2405,7 +2447,7 @@ if (length(out) > 0) {
 
 Plot the coefficients with their confidence intervals.
 
-```{r, fig.height=4, fig.width=6}
+```{r, fig.height=4, fig.width=8}
 # Collect all columns
 cols <- c(
   EXPOSURES_CONTINUOUS,
@@ -2444,7 +2486,7 @@ if (length(out) > 0) {
       term = factor(term, levels = term)
     ) %>%
     # Cup the high confidence interval to make the figure readable
-    mutate(ci_hi = ifelse(ci_hi > 50, 50, ci_hi))
+    mutate(ci_hi = ifelse(ci_hi > 128, 128, ci_hi))
   
   # Plot
   odds_ratios_plot <-
@@ -2503,7 +2545,7 @@ Use LASSO logistic regression not based on previous gradings.
 set.seed(141845)
 
 # Define values
-X <- X_without_gradings
+X <- X_without_gradings_centered
 y <- y_without_gradings
 
 # Perform cross-validation
@@ -2629,7 +2671,7 @@ if (length(out) > 0) {
       term = factor(term, levels = term)
     ) %>%
     # Cup the high confidence interval to make the figure readable
-    mutate(ci_hi = ifelse(ci_hi > 50, 50, ci_hi))
+    mutate(ci_hi = ifelse(ci_hi > 128, 128, ci_hi))
   
   # Plot
   odds_ratios_plot <-
@@ -2688,7 +2730,7 @@ Use LASSO logistic regression based on previous gradings.
 set.seed(141845)
 
 # Define values
-X <- X_with_gradings
+X <- X_with_gradings_centered
 y <- y_with_gradings
 
 # Perform cross-validation
@@ -2817,7 +2859,7 @@ if (length(out) > 0) {
       term = factor(term, levels = term)
     ) %>%
     # Cup the high confidence interval to make the figure readable
-    mutate(ci_hi = ifelse(ci_hi > 50, 50, ci_hi))
+    mutate(ci_hi = ifelse(ci_hi > 128, 128, ci_hi))
   
   # Plot
   odds_ratios_plot <-
@@ -2866,6 +2908,389 @@ if (length(out) > 0) {
 }
 ```
 
+
+## LASSO - without scores - without surgery
+
+- Use LASSO logistic regression not based on previous gradings.
+- Exclude surgery from the mix
+
+```{r}
+# Set seed
+set.seed(141845)
+
+# Define values
+X <- X_without_gradings_centered
+y <- y_without_gradings
+
+if (any(colnames(X) %in% "is_surgeryTRUE")) {
+  
+  X <- X[, !colnames(X) %in% "is_surgeryTRUE"]
+  
+  # Perform cross-validation
+  # (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
+  cv_fit <- cv.glmnet(
+    x = X,
+    y = y,
+    family = "binomial",
+    alpha = 1,
+    nfolds = 10
+  )
+  
+  # Extract the best lambda
+  best_lambda_min <- cv_fit$lambda.min
+  best_lambda_1se <- cv_fit$lambda.1se
+  
+  # Run glmnet
+  gfit <- glmnet(
+    x = X,
+    y = y,
+    family = "binomial",
+    alpha = 1,
+    intercept = TRUE,
+    standardize = TRUE
+  )
+  
+  # Extract coef for a given lambda - avoid the intercept term
+  # (given the small number of observations hence large SD, use min lambda)
+  lambda <- best_lambda_min
+  n <- nrow(y)
+  beta <- coef(
+    x = X,
+    y = y,
+    object = gfit,
+    s = lambda,
+    exact = TRUE
+  )
+  
+  # Estimate sigma
+  gsigmahat <- estimateSigma(
+    x = X,
+    y = y,
+    intercept = TRUE,
+    standardize = TRUE
+  )$sigmahat
+  
+  # Compute fixed lambda p-values and selection intervals
+  out <- fixedLassoInf(
+    x = X,
+    y = y,
+    beta = beta,
+    lambda = lambda,
+    # Level of significance
+    alpha = 0.1,
+    family = "binomial",
+    intercept = TRUE,
+    sigma = gsigmahat
+  )
+  
+  # Create model table (make this robust to no variable being selected)
+  if (length(out) > 0) {
+  
+    # Create table
+    robust_ci <- 
+      tibble(
+        term = names(out$vars),
+        odds_ratio = exp(out$coef0),
+        pvalue = out$pv,
+        ci_lo = exp(out$ci[, 1]),
+        ci_hi = exp(out$ci[, 2])
+      ) %>%
+      arrange(pvalue)
+    
+    # Print
+    robust_ci %>% sable()
+  
+  } else {
+  
+    # Print 
+    print("No variables were selected")
+  }
+  
+}
+```
+
+
+Plot the coefficients with their confidence intervals.
+
+```{r, fig.height=4, fig.width=6}
+# Collect all columns
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+)
+
+# Define function to replace ugly with pretty names
+prettify_terms <- function(old_terms, col_names = cols) {
+  
+  # Extract factor terms
+  factor_terms <- str_extract(old_terms, "[A-Z].*")
+  
+  # Extract new terms
+  base_terms <- str_replace(old_terms, "[A-Z].*$", "")
+  new_terms <- map_chr(base_terms, ~ names(col_names[col_names == .x]))
+  
+  # Add the TRUE label
+  new_terms <- ifelse(
+    is.na(factor_terms),
+    new_terms,
+    paste(new_terms, factor_terms, sep = " - ")
+  )
+  
+  return(new_terms)
+}
+
+if (length(out) > 0) {
+  # Create table
+  coef_table <-
+    robust_ci %>% 
+    filter(term != "(Intercept)") %>%
+    arrange(desc(pmin(pvalue, 0.1)), desc(odds_ratio)) %>%
+    mutate(
+      term = prettify_terms(term, cols),
+      term = factor(term, levels = term)
+    ) %>%
+    # Cup the high confidence interval to make the figure readable
+    mutate(ci_hi = ifelse(ci_hi > 128, 128, ci_hi))
+  
+  # Plot
+  odds_ratios_plot <-
+    coef_table %>%
+    ggplot(aes(x = odds_ratio, y = term, color = term)) +
+    geom_point() +
+    geom_errorbar(aes(xmin = ci_lo, xmax = ci_hi), width = 0.1) +
+    geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+    labs(x = "Odds Ratio", y = NULL) +
+    guides(color = FALSE) +
+    scale_x_continuous(
+      trans = "log2",
+      breaks = scales::trans_breaks("log2", function(x) 2^x),
+      labels = function(x) formatC(x,format = "g")
+      # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
+    ) +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 13),
+      plot.margin = unit(c(1, 0, 1, 0), "lines")  # Reduce right margin
+    )
+  
+  pvalues_table_plot <- 
+    coef_table %>% 
+    mutate(pvalue = formatC(pvalue, digits = 2, format = "fg")) %>% 
+    ggplot(aes(x = 1, y = term)) +
+    geom_text(aes(label = pvalue), hjust = 0, size = 4) +
+    scale_y_discrete(limits = levels(coef_table$term)) +
+    theme_void() +
+    ggtitle("P-value") +
+    theme(
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      plot.margin = unit(c(1, 0, 1, 0), "lines"),  # Reduce left margin
+      plot.title = element_text(hjust = 0.75, face = "bold")
+    )
+  
+  plots$odds_ratios_with_components_no_surgery <-
+    odds_ratios_plot +
+    plot_spacer() +
+    pvalues_table_plot + 
+    plot_layout(ncol = 3, widths = c(1, -0.19, 0.35))
+  
+  # Plot
+  plots$odds_ratios_with_components_no_surgery
+}
+```
+
+
+## LASSO - without componenets - without surgery
+
+- Use LASSO logistic regression based on previous gradings
+- Exclude surgery from the mix because it's too predictive
+
+```{r}
+# Set seed
+set.seed(141845)
+
+# Define values
+X <- X_with_gradings_centered
+y <- y_without_gradings
+
+if (any(colnames(X) %in% "is_surgeryTRUE")) {
+  
+  X <- X[, !colnames(X) %in% "is_surgeryTRUE"]
+  
+  # Perform cross-validation
+  # (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
+  cv_fit <- cv.glmnet(
+    x = X,
+    y = y,
+    family = "binomial",
+    alpha = 1,
+    nfolds = 10
+  )
+  
+  # Extract the best lambda
+  best_lambda_min <- cv_fit$lambda.min
+  best_lambda_1se <- cv_fit$lambda.1se
+  
+  # Run glmnet
+  gfit <- glmnet(
+    x = X,
+    y = y,
+    family = "binomial",
+    alpha = 1,
+    intercept = TRUE,
+    standardize = TRUE
+  )
+  
+  # Extract coef for a given lambda - avoid the intercept term
+  # (given the small number of observations hence large SD, use min lambda)
+  lambda <- best_lambda_min
+  n <- nrow(y)
+  beta <- coef(
+    x = X,
+    y = y,
+    object = gfit,
+    s = lambda,
+    exact = TRUE
+  )
+  
+  # Estimate sigma
+  gsigmahat <- estimateSigma(
+    x = X,
+    y = y,
+    intercept = TRUE,
+    standardize = TRUE
+  )$sigmahat
+  
+  # Compute fixed lambda p-values and selection intervals
+  out <- fixedLassoInf(
+    x = X,
+    y = y,
+    beta = beta,
+    lambda = lambda,
+    # Level of significance
+    alpha = 0.1,
+    family = "binomial",
+    intercept = TRUE,
+    sigma = gsigmahat
+  )
+  
+  # Create model table (make this robust to no variable being selected)
+  if (length(out) > 0) {
+  
+    # Create table
+    robust_ci <- 
+      tibble(
+        term = names(out$vars),
+        odds_ratio = exp(out$coef0),
+        pvalue = out$pv,
+        ci_lo = exp(out$ci[, 1]),
+        ci_hi = exp(out$ci[, 2])
+      ) %>%
+      arrange(pvalue)
+    
+    # Print
+    robust_ci %>% sable()
+  
+  } else {
+  
+    # Print 
+    print("No variables were selected")
+  }
+  
+}
+```
+
+
+Plot the coefficients with their confidence intervals.
+
+```{r, fig.height=4, fig.width=6}
+# Collect all columns
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+)
+
+# Define function to replace ugly with pretty names
+prettify_terms <- function(old_terms, col_names = cols) {
+  
+  # Extract factor terms
+  factor_terms <- str_extract(old_terms, "[A-Z].*")
+  
+  # Extract new terms
+  base_terms <- str_replace(old_terms, "[A-Z].*$", "")
+  new_terms <- map_chr(base_terms, ~ names(col_names[col_names == .x]))
+  
+  # Add the TRUE label
+  new_terms <- ifelse(
+    is.na(factor_terms),
+    new_terms,
+    paste(new_terms, factor_terms, sep = " - ")
+  )
+  
+  return(new_terms)
+}
+
+if (length(out) > 0) {
+  # Create table
+  coef_table <-
+    robust_ci %>% 
+    filter(term != "(Intercept)") %>%
+    arrange(desc(pmin(pvalue, 0.1)), desc(odds_ratio)) %>%
+    mutate(
+      term = prettify_terms(term, cols),
+      term = factor(term, levels = term)
+    ) %>%
+    # Cup the high confidence interval to make the figure readable
+    mutate(ci_hi = ifelse(ci_hi > 128, 128, ci_hi))
+  
+  # Plot
+  odds_ratios_plot <-
+    coef_table %>%
+    ggplot(aes(x = odds_ratio, y = term, color = term)) +
+    geom_point() +
+    geom_errorbar(aes(xmin = ci_lo, xmax = ci_hi), width = 0.1) +
+    geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+    labs(x = "Odds Ratio", y = NULL) +
+    guides(color = FALSE) +
+    scale_x_continuous(
+      trans = "log2",
+      breaks = scales::trans_breaks("log2", function(x) 2^x),
+      labels = function(x) formatC(x,format = "g")
+      # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
+    ) +
+    theme(
+      axis.text = element_text(size = 12),
+      axis.title = element_text(size = 13),
+      plot.margin = unit(c(1, 0, 1, 0), "lines")  # Reduce right margin
+    )
+  
+  pvalues_table_plot <- 
+    coef_table %>% 
+    mutate(pvalue = formatC(pvalue, digits = 2, format = "fg")) %>% 
+    ggplot(aes(x = 1, y = term)) +
+    geom_text(aes(label = pvalue), hjust = 0, size = 4) +
+    scale_y_discrete(limits = levels(coef_table$term)) +
+    theme_void() +
+    ggtitle("P-value") +
+    theme(
+      axis.text.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      plot.margin = unit(c(1, 0, 1, 0), "lines"),  # Reduce left margin
+      plot.title = element_text(hjust = 0.75, face = "bold")
+    )
+  
+  plots$odds_ratios_without_components_no_surgery <-
+    odds_ratios_plot +
+    plot_spacer() +
+    pvalues_table_plot + 
+    plot_layout(ncol = 3, widths = c(1, -0.19, 0.35))
+  
+  # Plot
+  plots$odds_ratios_without_components_no_surgery
+}
+```
 
 ------------------------------------------------------------------------
 
@@ -4340,6 +4765,25 @@ ggsave(
 )
 ```
 
+```{r}
+# Save
+ggsave(
+  file.path(pdf_folder, "odds_ratios_with_components_no_surgery.pdf"),
+  plot = plots$odds_ratios_with_components_no_surgery,
+  width = 6,
+  height = 6
+)
+```
+
+```{r}
+# Save
+ggsave(
+  file.path(pdf_folder, "odds_ratios_without_components_no_surgery.pdf"),
+  plot = plots$odds_ratios_without_components_no_surgery,
+  width = 6,
+  height = 6
+)
+```
 
 ```{r}
 # # Start graphic device
