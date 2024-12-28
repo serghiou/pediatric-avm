@@ -312,6 +312,7 @@ EXPOSURES_CONTINUOUS <- c(
 
 EXPOSURES_BINARY <- c(
   "Sex (Male)" = "is_male",
+  "First tx after Jun 2009" = "is_first_tx_after_2009",
   "Involves eloquent location" = "is_eloquent_location",
   "Has deep venous drainage" = "has_deep_venous_drainage",
   "Diffuse nidus" = "is_diffuse_nidus",
@@ -357,15 +358,247 @@ models <- list()
 
 ## Functions
 
-R utils.
+### R utils
 
 ```{r}
 ```
 
 
-Data analysis utils.
+### Data analysis utils
+
+Parse inconsistent dates.
 
 ```{r}
+# Function to parse dates using the appropriate format
+# (needed b/c some are "%m/%d/%Y" and some "%m/%d/%y")
+parse_inconsistent_dates <- function(date_col) {
+  # Try %m/%d/%y format first
+  parsed_dates <- as.Date(date_col, format = "%m/%d/%Y")
+  
+  # Identify and correct dates before 1950
+  parsed_dates <- ifelse(
+    !is.na(parsed_dates) & parsed_dates < as.Date("1950-01-01"),
+    as.Date(date_col, format = "%m/%d/%y"),
+    parsed_dates
+  )
+  
+  # Return corrected dates
+  as.Date(parsed_dates, origin = "1970-01-01")
+}
+```
+
+
+Descriptive statistics - continuous variables.
+
+```{r}
+compute_descriptive_continuous <- function(
+    df = df_uni,
+    cols = c(EXPOSURES_CONTINUOUS),
+    outcome_col = CHOSEN_OUTCOME,
+    outcome_levels = CHOSEN_OUTCOME_LEVELS,
+    outcome_labels = CHOSEN_OUTCOME_LABELS,
+    use_interaction = TRUE,
+    interaction_col = "has_hemorrhage",
+    interaction_col_name = "Hemorrhage at presentation",
+    interaction_col_value = TRUE,
+    prefix = "Haem") {
+  
+  # Apply desired formatting to numbers
+  format_numbers <- function(x) {
+    sprintf("%.1f", x)
+  }
+
+  # Compute new dataset
+  df <-
+    df %>%
+    select(cols, outcome_col, interaction_col) %>%
+    drop_na(outcome_col, interaction_col)
+
+  # Apply interaction
+  if (use_interaction) {
+    df <-
+      df %>%
+      filter(!!sym(interaction_col) == interaction_col_value)
+  }
+
+  # Compute descriptive statistics
+  desc_stats <-
+    df %>%
+    pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+    group_by(!!sym(outcome_col), keys) %>%
+    summarize(
+      num_total = n(),
+      num_missing = sum(is.na(values)),
+      mean = mean(values, na.rm = TRUE),
+      sd = sd(values, na.rm = TRUE),
+      min = quantile(values, 0, na.rm = TRUE),
+      max = quantile(values, 1, na.rm = TRUE),
+      q_50 = quantile(values, 0.50, na.rm = TRUE),
+      q_25 = quantile(values, 0.25, na.rm = TRUE),
+      q_75 = quantile(values, 0.75, na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      stats = glue::glue("{format_numbers(mean)} ({format_numbers(sd)})"),
+      !!sym(outcome_col) := factor(
+        !!sym(outcome_col),
+        levels = outcome_levels,
+        labels = outcome_labels
+      )
+    ) %>%
+    pivot_wider(
+      id_cols = keys,
+      names_from = !!sym(outcome_col),
+      values_from = stats
+    ) %>%
+    relocate(outcome_labels[2], .after = outcome_labels[1])
+
+  # Compute p-values
+  pvals <-
+    df %>%
+    pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+    group_by(keys) %>%
+    summarize(
+      pvalue = wilcox.test(values ~ !!sym(outcome_col))$p.value
+    )
+
+  # Synthesize
+  out <-
+    desc_stats %>%
+    left_join(pvals)
+
+  # Add sample size to column names
+  num_with_outcome <- sum(df %>% pull(outcome_col))
+  num_no_outcome <- sum(!df %>% pull(outcome_col))
+
+  new_col_names <- c(
+    glue::glue("{prefix} - {outcome_labels[2]} (n={num_with_outcome})"),
+    glue::glue("{prefix} - {outcome_labels[1]} (n={num_no_outcome})"),
+    glue::glue("{prefix} - P-value")
+  )
+
+  out <-
+    out %>%
+    rename_with(
+      .cols = !!sym(outcome_labels[1]):pvalue, ~new_col_names
+    ) %>%
+    mutate(
+      keys = ifelse(keys == interaction_col, interaction_col_name, keys)
+    )
+
+  return(out)
+}
+```
+
+
+Descriptive statistics - binary variables.
+
+```{r}
+compute_descriptive_binary <- function(
+    df = df_uni,
+    cols = c(EXPOSURES_BINARY),
+    outcome_col = CHOSEN_OUTCOME,
+    outcome_levels = CHOSEN_OUTCOME_LEVELS,
+    outcome_labels = CHOSEN_OUTCOME_LABELS,
+    use_interaction = TRUE,
+    interaction_col = "has_hemorrhage",
+    interaction_col_name = "Hemorrhage at presentation",
+    interaction_col_value = TRUE,
+    prefix = "Haem") {
+  
+  # Define arguments
+  cols <- c(cols[!cols == interaction_col])
+
+  # Apply desired formatting to numbers
+  format_numbers <- function(x, decimals = 0) {
+    decimals <- paste0("%.", decimals, "f")
+    sprintf(decimals, x)
+  }
+
+  # Compute new dataset
+  df <-
+    df %>%
+    select(all_of(cols), outcome_col, interaction_col) %>%
+    drop_na(outcome_col, interaction_col)
+
+  # Apply interaction
+  if (use_interaction) {
+    df <-
+      df %>%
+      filter(!!sym(interaction_col) == interaction_col_value)
+  }
+
+  # Compute descriptive statistics
+  desc_stats <-
+    df %>%
+    pivot_longer(
+      cols = -c(outcome_col),
+      names_to = "keys",
+      values_to = "values"
+    ) %>%
+    group_by(!!sym(outcome_col), keys) %>%
+    summarize(
+      num_total = n(),
+      num_missing = sum(is.na(values)),
+      num_with = sum(values, na.rm = TRUE),
+      num_without = sum(!values, na.rm = TRUE),
+      pct_with = mean(values, na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      stats = glue::glue("{num_with} ({format_numbers(pct_with*100)}%)"),
+      !!sym(outcome_col) := factor(
+        !!sym(outcome_col),
+        levels = outcome_levels,
+        labels = outcome_labels
+      )
+    ) %>%
+    pivot_wider(
+      id_cols = keys,
+      names_from = !!sym(outcome_col),
+      values_from = stats
+    ) %>%
+    relocate(outcome_labels[1], .after = outcome_labels[2])
+
+  # Compute p-values
+  pvals <-
+    df %>%
+    pivot_longer(
+      cols = -c(outcome_col),
+      names_to = "keys",
+      values_to = "values"
+    ) %>%
+    group_by(keys) %>%
+    summarize(
+      pvalue = kruskal.test(values ~ !!sym(outcome_col))$p.value
+    )
+
+  # Synthesize
+  out <-
+    desc_stats %>%
+    left_join(pvals)
+
+  # Prettify
+  num_with_outcome <- sum(df %>% pull(outcome_col))
+  num_no_outcome <- sum(!df %>% pull(outcome_col))
+
+  new_col_names <- c(
+    glue::glue("{prefix} - {outcome_labels[2]} (n={num_with_outcome})"),
+    glue::glue("{prefix} - {outcome_labels[1]} (n={num_no_outcome})"),
+    glue::glue("{prefix} - P-value")
+  )
+
+  out <-
+    out %>%
+    rename_with(
+      .cols = !!sym(outcome_labels[2]):pvalue, ~new_col_names
+    ) %>%
+    mutate(
+      keys = ifelse(keys == interaction_col, interaction_col_name, keys)
+    )
+
+  return(out)
+}
 ```
 
 
@@ -379,7 +612,13 @@ filepath <- file.path(SRC_DIRNAME, SRC_BASENAME)
 
 # Read
 patients_ <-
-  read_csv(filepath) %>%
+  read_csv(
+    filepath,
+    col_types = cols(
+      .default = col_guess(), # Default behavior for other columns
+      date_first_treatment = col_character()
+    )
+  ) %>%
   dplyr::sample_frac(params$PROPORTION_OF_DATA)
 
 # If analyzing a subset of the data, restrict the dataset
@@ -510,6 +749,39 @@ df_uni <-
 ```
 
 
+For `date_first_treatment`,transform into dates and create > 2009 vs. not.
+
+```{r}
+# Parse into Date format and create dichotomous variable
+df_uni <-
+  df_uni %>%
+  mutate(across(starts_with("date"), ~ parse_inconsistent_dates(.x))) %>% 
+  mutate(is_first_tx_after_2009 = date_first_treatment >= as.Date("2009-06-30"))
+
+# Fix dates and parse into Date format
+df_multi <-
+  df_multi %>%
+  mutate(across(starts_with("date"), ~ parse_inconsistent_dates(.x))) %>% 
+  mutate(is_first_tx_after_2009 = date_first_treatment >= as.Date("2009-06-30"))
+
+# Check for missingness
+num_missing <-
+  df_uni %>% 
+  filter(is.na(date_first_treatment)) %>% 
+  pull(patient_id) %>% 
+  length()
+
+ids_missing <- 
+  df_uni %>%
+  filter(is.na(date_first_treatment)) %>% 
+  pull(patient_id)
+
+# Check for non-sensical data
+min(df_uni$date_first_treatment, na.rm = T) > as.Date("1980-01-01")
+max(df_uni$date_first_treatment, na.rm = T) < as.Date("2025-01-01")
+```
+
+
 ## Missingness
 
 ```{r}
@@ -517,6 +789,7 @@ df_uni <-
 cols <- unname(c(
   EXPOSURES_CONTINUOUS,
   EXPOSURES_BINARY,
+  "is_first_tx_after_2009",
   EXPOSURES_CATEGORICAL,
   OUTCOMES
 ))
@@ -750,217 +1023,101 @@ plots$sm_grade_vs_complications_bar_chart
 ```
 
 
+## By date
+
+Every 1 year.
+
+```{r}
+# Create table
+df_by_date <-
+  df_uni %>%
+  filter(!is.na(date_first_treatment)) %>% 
+  mutate(year_first_treatment = format(date_first_treatment, "%Y")) %>% 
+  group_by(year_first_treatment) %>% 
+  summarize(
+    num_patients = n(),
+    num_poor_outcome = sum(is_poor_outcome),
+    pct_poor_outcome = 100 * num_poor_outcome / num_patients
+  )
+
+df_by_date %>% 
+  ggplot(aes(x = year_first_treatment, y = pct_poor_outcome)) +
+  geom_col() +
+  geom_text(
+    aes(
+      label = paste0(num_poor_outcome, "/", num_patients)
+    ),
+    size = 2,
+    vjust = -0.5  # Adjust vertical position above the bar
+  ) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1.5, vjust = 2.5)
+  ) +
+  labs(
+    x = "Year of First Treatment",
+    y = "Poor outcomes (%)",
+    title = "Percentage of Poor Outcomes by Year"
+  )
+```
+
+
+Every 5 years.
+
+```{r}
+# Create table
+df_by_date <-
+  df_uni %>%
+  filter(!is.na(date_first_treatment)) %>% 
+  mutate(year_first_treatment = as.numeric(format(date_first_treatment, "%Y"))) %>%
+  mutate(
+    year_interval = paste0(
+      floor(year_first_treatment / 5) * 5,
+      "-",
+      floor(year_first_treatment / 5) * 5 + 4
+    )
+  ) %>% 
+  group_by(year_interval) %>% 
+  summarize(
+    num_patients = n(),
+    num_poor_outcome = sum(is_poor_outcome),
+    pct_poor_outcome = 100 * num_poor_outcome / num_patients
+  )
+
+# Visualize
+df_by_date %>% 
+  ggplot(aes(x = year_interval, y = pct_poor_outcome)) +
+  geom_col() +
+  geom_text(
+    aes(
+      label = paste0(num_poor_outcome, "/", num_patients)
+    ),
+    size = 3,
+    vjust = -0.5  # Adjust vertical position above the bar
+  ) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 1)
+  ) +
+  labs(
+    x = "Year of First Treatment",
+    y = "Poor outcomes (%)",
+    title = "Percentage of Poor Outcomes by Year"
+  )
+```
+
+
 ------------------------------------------------------------------------
 
 # Descriptive statistics
 
 ## Setup
 
-Descriptive statistics - continuous variables.
-
 ```{r}
-compute_descriptive_continuous <- function(
-    df = df_uni,
-    cols = c(EXPOSURES_CONTINUOUS),
-    use_interaction = TRUE,
-    interaction_col = "has_hemorrhage",
-    interaction_col_name = "Hemorrhage at presentation",
-    interaction_col_value = TRUE,
-    prefix = "Haem") {
-  # Apply desired formatting to numbers
-  format_numbers <- function(x) {
-    sprintf("%.1f", x)
-  }
 
-  # Compute new dataset
-  df <-
-    df %>%
-    select(cols, CHOSEN_OUTCOME, interaction_col) %>%
-    drop_na(CHOSEN_OUTCOME, interaction_col)
-
-  # Apply interaction
-  if (use_interaction) {
-    df <-
-      df %>%
-      filter(!!sym(interaction_col) == interaction_col_value)
-  }
-
-  # Compute descriptive statistics
-  desc_stats <-
-    df %>%
-    pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
-    group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
-    summarize(
-      num_total = n(),
-      num_missing = sum(is.na(values)),
-      mean = mean(values, na.rm = TRUE),
-      sd = sd(values, na.rm = TRUE),
-      min = quantile(values, 0, na.rm = TRUE),
-      max = quantile(values, 1, na.rm = TRUE),
-      q_50 = quantile(values, 0.50, na.rm = TRUE),
-      q_25 = quantile(values, 0.25, na.rm = TRUE),
-      q_75 = quantile(values, 0.75, na.rm = TRUE)
-    ) %>%
-    ungroup() %>%
-    mutate(
-      stats = glue::glue("{format_numbers(mean)} ({format_numbers(sd)})"),
-      !!sym(CHOSEN_OUTCOME) := factor(
-        !!sym(CHOSEN_OUTCOME),
-        levels = CHOSEN_OUTCOME_LEVELS,
-        labels = CHOSEN_OUTCOME_LABELS
-      )
-    ) %>%
-    pivot_wider(
-      id_cols = keys,
-      names_from = !!sym(CHOSEN_OUTCOME),
-      values_from = stats
-    ) %>%
-    relocate(CHOSEN_OUTCOME_LABELS[2], .after = CHOSEN_OUTCOME_LABELS[1])
-
-  # Compute p-values
-  pvals <-
-    df %>%
-    pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
-    group_by(keys) %>%
-    summarize(
-      pvalue = wilcox.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
-    )
-
-  # Synthesize
-  out <-
-    desc_stats %>%
-    left_join(pvals)
-
-  # Add sample size to column names
-  num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
-  num_no_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
-
-  new_col_names <- c(
-    glue::glue("{prefix} - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
-    glue::glue("{prefix} - {CHOSEN_OUTCOME_LABELS[1]} (n={num_no_outcome})"),
-    glue::glue("{prefix} - P-value")
-  )
-
-  out <-
-    out %>%
-    rename_with(
-      .cols = !!sym(CHOSEN_OUTCOME_LABELS[1]):pvalue, ~new_col_names
-    ) %>%
-    mutate(
-      keys = ifelse(keys == interaction_col, interaction_col_name, keys)
-    )
-
-  return(out)
-}
 ```
-
-
-Descriptive statistics - binary variables.
-
-```{r}
-compute_descriptive_binary <- function(
-    df = df_uni,
-    cols = c(EXPOSURES_BINARY),
-    use_interaction = TRUE,
-    interaction_col = "has_hemorrhage",
-    interaction_col_name = "Hemorrhage at presentation",
-    interaction_col_value = TRUE,
-    prefix = "Haem") {
-  # Define arguments
-  cols <- c(cols[!cols == interaction_col])
-
-  # Apply desired formatting to numbers
-  format_numbers <- function(x, decimals = 0) {
-    decimals <- paste0("%.", decimals, "f")
-    sprintf(decimals, x)
-  }
-
-  # Compute new dataset
-  df <-
-    df %>%
-    select(all_of(cols), CHOSEN_OUTCOME, interaction_col) %>%
-    drop_na(CHOSEN_OUTCOME, interaction_col)
-
-  # Apply interaction
-  if (use_interaction) {
-    df <-
-      df %>%
-      filter(!!sym(interaction_col) == interaction_col_value)
-  }
-
-  # Compute descriptive statistics
-  desc_stats <-
-    df %>%
-    pivot_longer(
-      cols = -c(CHOSEN_OUTCOME),
-      names_to = "keys",
-      values_to = "values"
-    ) %>%
-    group_by(!!sym(CHOSEN_OUTCOME), keys) %>%
-    summarize(
-      num_total = n(),
-      num_missing = sum(is.na(values)),
-      num_with = sum(values, na.rm = TRUE),
-      num_without = sum(!values, na.rm = TRUE),
-      pct_with = mean(values, na.rm = TRUE)
-    ) %>%
-    ungroup() %>%
-    mutate(
-      stats = glue::glue("{num_with} ({format_numbers(pct_with*100)}%)"),
-      !!sym(CHOSEN_OUTCOME) := factor(
-        !!sym(CHOSEN_OUTCOME),
-        levels = CHOSEN_OUTCOME_LEVELS,
-        labels = CHOSEN_OUTCOME_LABELS
-      )
-    ) %>%
-    pivot_wider(
-      id_cols = keys,
-      names_from = !!sym(CHOSEN_OUTCOME),
-      values_from = stats
-    ) %>%
-    relocate(CHOSEN_OUTCOME_LABELS[1], .after = CHOSEN_OUTCOME_LABELS[2])
-
-  # Compute p-values
-  pvals <-
-    df %>%
-    pivot_longer(
-      cols = -c(CHOSEN_OUTCOME),
-      names_to = "keys",
-      values_to = "values"
-    ) %>%
-    group_by(keys) %>%
-    summarize(
-      pvalue = kruskal.test(values ~ !!sym(CHOSEN_OUTCOME))$p.value
-    )
-
-  # Synthesize
-  out <-
-    desc_stats %>%
-    left_join(pvals)
-
-  # Prettify
-  num_with_outcome <- sum(df %>% pull(CHOSEN_OUTCOME))
-  num_no_outcome <- sum(!df %>% pull(CHOSEN_OUTCOME))
-
-  new_col_names <- c(
-    glue::glue("{prefix} - {CHOSEN_OUTCOME_LABELS[2]} (n={num_with_outcome})"),
-    glue::glue("{prefix} - {CHOSEN_OUTCOME_LABELS[1]} (n={num_no_outcome})"),
-    glue::glue("{prefix} - P-value")
-  )
-
-  out <-
-    out %>%
-    rename_with(
-      .cols = !!sym(CHOSEN_OUTCOME_LABELS[2]):pvalue, ~new_col_names
-    ) %>%
-    mutate(
-      keys = ifelse(keys == interaction_col, interaction_col_name, keys)
-    )
-
-  return(out)
-}
-```
-
 
 
 ## Non-specific
@@ -1308,9 +1465,55 @@ if (!str_detect(params$TITLE, "grade")) {
 ```
 
 
+## By date
+
+```{r}
+# Define arguments
+outcome_col <- "is_first_tx_after_2009"
+outcome_levels <- c(FALSE, TRUE)
+outcome_labels <- c("After Jun '09", "At or before Jun '09")
+
+# Get all
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  outcome_col = outcome_col,
+  outcome_levels = outcome_levels,
+  outcome_labels = outcome_labels,
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out[[2]] <- compute_descriptive_binary(
+  cols = EXPOSURES_BINARY[!EXPOSURES_BINARY %in% c("is_first_tx_after_2009")],
+  outcome_col = outcome_col,
+  outcome_levels = outcome_levels,
+  outcome_labels = outcome_labels,
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out_all <- bind_rows(out)
+
+# Synthesize
+out_complete <-
+  out_all %>%
+  arrange(`All - P-value`)
+
+# Print
+out_complete %>%
+  sable()
+```
+
+
 ------------------------------------------------------------------------
 
-# Associations
+# Associational statistics
+
+## Correlations
 
 Correlation matrix.
 
@@ -2147,7 +2350,9 @@ unwanted_all <- c(
   "modified_rankin_score_postop_within_1_week",
   "modified_rankin_score_final",
   # Use the split between high vs. low grade instead of the granular
-  "spetzler_martin_grade"
+  "spetzler_martin_grade",
+  # Irrelevant to treatment
+  "is_first_tx_after_2009"
 )
 
 # Remove interaction terms from the mix
@@ -2301,7 +2506,7 @@ X_with_gradings_centered <- center_values(X_with_gradings)
 X_without_gradings_centered <- center_values(X_without_gradings)
 
 # See the names of X to match column numbers to column names later on
-colnames(X_without_gradings_scaled)
+colnames(X_without_gradings_centered)
 ```
 
 
@@ -2387,8 +2592,19 @@ gfit <- glmnet(
   standardize = TRUE
 )
 
+# Choose lambda
+idx <- which(cv_fit$lambda %in% best_lambda_min)
+num_coefs <- as.numeric(cv_fit$nzero[idx])
+
+if (num_coefs == 0) {
+  # Go one up to get more coefficients
+  lambda <- cv_fit$lambda[idx + 3]
+} else {
+  # Given the small number of observations hence large SD, use min lambda
+  lambda <- best_lambda_min
+}
+
 # Extract coef for a given lambda - avoid the intercept term
-# (given the small number of observations hence large SD, use min lambda)
 lambda <- best_lambda_min
 n <- nrow(y)
 beta <- coef(
@@ -2500,7 +2716,7 @@ if (length(out) > 0) {
     scale_x_continuous(
       trans = "log2",
       breaks = scales::trans_breaks("log2", function(x) 2^x),
-      labels = function(x) formatC(x, format = "g")
+      labels = function(x) formatC(x, format = "g", digits = 2)
       # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
     ) +
     theme(
@@ -2573,9 +2789,19 @@ gfit <- glmnet(
   standardize = TRUE
 )
 
+# Choose lambda
+idx <- which(cv_fit$lambda %in% best_lambda_min)
+num_coefs <- as.numeric(cv_fit$nzero[idx])
+
+if (num_coefs == 0) {
+  # Go one up to get more coefficients
+  lambda <- cv_fit$lambda[idx + 3]
+} else {
+  # Given the small number of observations hence large SD, use min lambda
+  lambda <- best_lambda_min
+}
+
 # Extract coef for a given lambda - avoid the intercept term
-# (given the small number of observations hence large SD, use min lambda)
-lambda <- best_lambda_min
 n <- nrow(y)
 beta <- coef(
   x = X,
@@ -2686,7 +2912,7 @@ if (length(out) > 0) {
     scale_x_continuous(
       trans = "log2",
       breaks = scales::trans_breaks("log2", function(x) 2^x),
-      labels = function(x) formatC(x,format = "g")
+      labels = function(x) formatC(x, format = "g", digits = 2)
       # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
     ) +
     theme(
@@ -2759,8 +2985,19 @@ gfit <- glmnet(
   standardize = TRUE
 )
 
+# Choose lambda
+idx <- which(cv_fit$lambda %in% best_lambda_min)
+num_coefs <- as.numeric(cv_fit$nzero[idx])
+
+if (num_coefs == 0) {
+  # Go one up to get more coefficients
+  lambda <- cv_fit$lambda[idx + 3]
+} else {
+  # Given the small number of observations hence large SD, use min lambda
+  lambda <- best_lambda_min
+}
+
 # Extract coef for a given lambda - avoid the intercept term
-# (given the small number of observations hence large SD, use min lambda)
 lambda <- best_lambda_min
 n <- nrow(y)
 beta <- coef(
@@ -2875,7 +3112,7 @@ if (length(out) > 0) {
     scale_x_continuous(
       trans = "log2",
       breaks = scales::trans_breaks("log2", function(x) 2^x),
-      labels = function(x) formatC(x,format = "g")
+      labels = function(x) formatC(x, format = "g", digits = 2)
       # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
     ) +
     theme(
@@ -2953,8 +3190,19 @@ if (any(colnames(X) %in% "is_surgeryTRUE")) {
     standardize = TRUE
   )
   
+  # Choose lambda
+  idx <- which(cv_fit$lambda %in% best_lambda_min)
+  num_coefs <- as.numeric(cv_fit$nzero[idx])
+  
+  if (num_coefs == 0) {
+    # Go one up to get more coefficients
+    lambda <- cv_fit$lambda[idx + 3]
+  } else {
+    # Given the small number of observations hence large SD, use min lambda
+    lambda <- best_lambda_min
+  }
+  
   # Extract coef for a given lambda - avoid the intercept term
-  # (given the small number of observations hence large SD, use min lambda)
   lambda <- best_lambda_min
   n <- nrow(y)
   beta <- coef(
@@ -3068,7 +3316,7 @@ if (length(out) > 0) {
     scale_x_continuous(
       trans = "log2",
       breaks = scales::trans_breaks("log2", function(x) 2^x),
-      labels = function(x) formatC(x,format = "g")
+      labels = function(x) formatC(x, format = "g", digits = 2)
       # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
     ) +
     theme(
@@ -3145,8 +3393,19 @@ if (any(colnames(X) %in% "is_surgeryTRUE")) {
     standardize = TRUE
   )
   
+  # Choose lambda
+  idx <- which(cv_fit$lambda %in% best_lambda_min)
+  num_coefs <- as.numeric(cv_fit$nzero[idx])
+  
+  if (num_coefs == 0) {
+    # Go up to get more coefficients
+    lambda <- cv_fit$lambda[idx + 3]
+  } else {
+    # Given the small number of observations hence large SD, use min lambda
+    lambda <- best_lambda_min
+  }
+  
   # Extract coef for a given lambda - avoid the intercept term
-  # (given the small number of observations hence large SD, use min lambda)
   lambda <- best_lambda_min
   n <- nrow(y)
   beta <- coef(
@@ -3260,7 +3519,18 @@ if (length(out) > 0) {
     scale_x_continuous(
       trans = "log2",
       breaks = scales::trans_breaks("log2", function(x) 2^x),
-      labels = function(x) formatC(x,format = "g")
+    #   labels = function(x) {
+    #   sapply(x, function(val) {
+    #     if (is.na(val)) {
+    #       NA  # Keep NA values as they are
+    #     } else if (val >= 0.0625) {
+    #       formatC(val, format = "fg", digits = 2)
+    #     } else {
+    #       formatC(val, format = "e", digits = 1)
+    #     }
+    #   })
+    # }
+      labels = function(x) formatC(x, format = "g", digits = 2)
       # labels = scales::label_number(accuracy = 0.1, trim = TRUE)
     ) +
     theme(
