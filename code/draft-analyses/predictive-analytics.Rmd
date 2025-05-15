@@ -712,7 +712,7 @@ df_uni <-
 ```
 
 
-For `location`, reduce choices (use "Other").
+For `location`, reduce levels (use "Other").
 
 ```{r}
 df_multi <-
@@ -1076,6 +1076,52 @@ df_by_date <-
       floor(year_first_treatment / 5) * 5,
       "-",
       floor(year_first_treatment / 5) * 5 + 4
+    )
+  ) %>% 
+  group_by(year_interval) %>% 
+  summarize(
+    num_patients = n(),
+    num_poor_outcome = sum(is_poor_outcome),
+    pct_poor_outcome = 100 * num_poor_outcome / num_patients
+  )
+
+# Visualize
+df_by_date %>% 
+  ggplot(aes(x = year_interval, y = pct_poor_outcome)) +
+  geom_col() +
+  geom_text(
+    aes(
+      label = paste0(num_poor_outcome, "/", num_patients)
+    ),
+    size = 3,
+    vjust = -0.5  # Adjust vertical position above the bar
+  ) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 1)
+  ) +
+  labs(
+    x = "Year of First Treatment",
+    y = "Poor outcomes (%)",
+    title = "Percentage of Poor Outcomes by Year"
+  )
+```
+
+
+Every 5 years.
+
+```{r, fig.height=6, fig.width=6}
+# Create table
+df_by_date <-
+  df_uni %>%
+  filter(!is.na(date_first_treatment)) %>% 
+  mutate(year_first_treatment = as.numeric(format(date_first_treatment, "%Y"))) %>%
+  mutate(
+    year_interval = paste0(
+      floor(year_first_treatment / 10) * 10,
+      "-",
+      floor(year_first_treatment / 10) * 10 + 9
     )
   ) %>% 
   group_by(year_interval) %>% 
@@ -1635,9 +1681,10 @@ fit_model <- function(
 ```
 
 
-## Unadjusted - Original
+## Unadjusted - Original variables
 
-Fit logistic with no adjustments. Use original feature definitions.
+- Fit logistic with no adjustments
+- Use original feature definitions
 
 ```{r}
 # Define cols
@@ -1664,7 +1711,7 @@ univariable_unadjusted %>%
 ```
 
 
-## Adjusted - Original
+## Adjusted - Original variables
 
 - Fit logistic
 - Adjust for age at first treatment and sex
@@ -1753,7 +1800,7 @@ univariable_adjusted %>%
 ```
 
 
-## Unadjusted - Recoded
+## Unadjusted - Recoded variables
 
 - Fit logistic with no adjustments
 - Use the recoded feature definitions (less levels for max statistical power)
@@ -1926,7 +1973,6 @@ univariable_adjusted_recoded %>%
 ```
 
 
-
 ------------------------------------------------------------------------
 
 # Interaction analysis
@@ -2061,7 +2107,7 @@ for (i in seq_along(out)) {
 ```
 
 
-Create and print table
+Create and print table.
 
 ```{r}
 # Create table
@@ -2074,7 +2120,6 @@ univariable_adjusted_recoded_interactions <-
 univariable_adjusted_recoded_interactions %>%
   sable()
 ```
-
 
 Eloquence.
 
@@ -2091,7 +2136,6 @@ df %>%
   sable()
 ```
 
-
 Deficit.
 
 ```{r}
@@ -2106,7 +2150,6 @@ df %>%
   ) %>%
   sable()
 ```
-
 
 Seizures.
 
@@ -2254,7 +2297,7 @@ for (i in seq_along(out)) {
 ```
 
 
-Create and print table
+Create and print table.
 
 ```{r}
 # Create table
@@ -2267,7 +2310,6 @@ univariable_adjusted_recoded_interactions <-
 univariable_adjusted_recoded_interactions %>%
   sable()
 ```
-
 
 Eloquence.
 
@@ -2288,7 +2330,6 @@ df %>%
   sable()
 ```
 
-
 Deficit.
 
 ```{r}
@@ -2307,7 +2348,6 @@ df %>%
   ) %>%
   sable()
 ```
-
 
 Seizures.
 
@@ -2339,6 +2379,8 @@ Read the following guides:
 
 - [Selective inference using forward selection](https://stephens999.github.io/misc/selective_inference_toy.html)
 
+- [LASSO when conditioning on less: ROSI](https://selective-inference.github.io/Python-software/algorithms/ROSI.html)
+
 
 ## Setup
 
@@ -2349,13 +2391,13 @@ unwanted_all <- c(
   # Use values at or before first treatment
   "modified_rankin_score_postop_within_1_week",
   "modified_rankin_score_final",
-  # Use the split between high vs. low grade instead of the granular
+  # Use high vs. low grade instead of the granular for power
   "spetzler_martin_grade",
   # Irrelevant to treatment
   "is_first_tx_after_2009"
 )
 
-# Remove interaction terms from the mix
+# Remove interaction terms
 if (str_detect(params$TITLE, "Hemorrhage")) {
   unwanted_all <- c(unwanted_all, "has_hemorrhage")
 }
@@ -2368,21 +2410,21 @@ unwanted_without_gradings <- c(
   unwanted_all,
   # Spetzler-Martin grade (size score + eloquent location + venous drainage)
   "is_spetzler_martin_grade_less_than_4",
-  "size_score", # Already covered by the more detailed max_size_cm
-  "venous_drainage", # Already covered by has_deep_venous_drainage
-  "location", # Already covered to some extent by eloquence
+  "size_score",  # Already covered by the more detailed max_size_cm
+  "venous_drainage",  # Already covered by has_deep_venous_drainage
+  "location",  # Already covered to some extent by eloquence
   # Lawton-Young grade (SM + age + diffuse nidus + hemorrhage)
-  # (SM is heavily overlapping with LY, so include its components)
+  # (SM heavily overlaps with LY, so include its components)
   "lawton_young_grade",
-  # Use mRS pre-treatment (more predictive)
-  "modified_rankin_score_presentation" # "modified_rankin_score_pretreatment"
+  # Use mRS score or pre-treatment (likely more predictive)
+  "modified_rankin_score_presentation"  # "modified_rankin_score_pretreatment"
 )
 
 # Define cols of interest - use grading scores whenever these exist
 unwanted_with_gradings <- c(
   unwanted_all,
   # Spetzler-Martin grade (size score + eloquent location + venous drainage)
-  "is_spetzler_martin_grade_less_than_4", # The grade has lower p-value
+  "is_spetzler_martin_grade_less_than_4",  # The grade has lower p-value
   "size_score",
   "max_size_cm",
   "is_eloquent_location",
@@ -2390,7 +2432,7 @@ unwanted_with_gradings <- c(
   "has_deep_venous_drainage",
   "venous_drainage",
   # Lawton-Young grade (SM + age + diffuse nidus + hemorrhage)
-  # (SM is heavily overlapping with LY, so include its components)
+  # (SM heavily overlaps with LY, so include its components)
   "lawton_young_grade",
   # "is_diffuse_nidus",
   # "has_hemorrhage",
@@ -2398,8 +2440,7 @@ unwanted_with_gradings <- c(
   "modified_rankin_score_final",
   "modified_rankin_score_postop_within_1_week",
   # Use mRS pre-treatment (more predictive)
-  "modified_rankin_score_presentation"
-  # "modified_rankin_score_pretreatment"
+  "modified_rankin_score_presentation"  # "modified_rankin_score_pretreatment"
 )
 ```
 
@@ -2491,7 +2532,6 @@ for (pair in priority_pairs) {
 
 # X should be centered for LASSO (necessary for glmnet)
 # (scale = FALSE as this is done by the standardization step in glmnet)
-# whe
 center_values <- function(X) {
   # Identify binary columns (those with only 0s and 1s)
   binary_cols <- apply(X, 2, function(x) all(x %in% c(0, 1)))
@@ -2606,7 +2646,7 @@ if (num_coefs == 0) {
 
 # Extract coef for a given lambda - avoid the intercept term
 lambda <- best_lambda_min
-n <- nrow(y)
+n <- length(y)
 beta <- coef(
   x = X,
   y = y,
@@ -2629,7 +2669,7 @@ out <- fixedLassoInf(
   y = y,
   beta = beta,
   lambda = lambda,
-  # Level of significance
+  # Level of significance (0.1 is 95% CI)
   alpha = 0.1,
   family = "binomial",
   intercept = TRUE,
@@ -2767,6 +2807,7 @@ y <- y_without_gradings
 
 # Perform cross-validation
 # (alpha = 1 for lasso, alpha = 0 for ridge, 0 < alpha < 1 for elastic net)
+# (sequence of lambdas is chosen automatically - better than user-supplied)
 cv_fit <- cv.glmnet(
   x = X,
   y = y,
@@ -2802,12 +2843,12 @@ if (num_coefs == 0) {
 }
 
 # Extract coef for a given lambda - avoid the intercept term
-n <- nrow(y)
+n <- length(y)
 beta <- coef(
   x = X,
   y = y,
   object = gfit,
-  s = lambda,
+  s = lambda/n,
   exact = TRUE
 )
 
@@ -2825,7 +2866,7 @@ out <- fixedLassoInf(
   y = y,
   beta = beta,
   lambda = lambda,
-  # Level of significance
+  # Level of significance (0.1 is 95% CI)
   alpha = 0.1,
   family = "binomial",
   intercept = TRUE,
@@ -2999,7 +3040,7 @@ if (num_coefs == 0) {
 
 # Extract coef for a given lambda - avoid the intercept term
 lambda <- best_lambda_min
-n <- nrow(y)
+n <- length(y)
 beta <- coef(
   x = X,
   y = y,
@@ -3022,7 +3063,7 @@ out <- fixedLassoInf(
   y = y,
   beta = beta,
   lambda = lambda,
-  # Level of significance
+  # Level of significance (0.1 is 95% CI)
   alpha = 0.1,
   family = "binomial",
   intercept = TRUE,
@@ -3151,8 +3192,8 @@ if (length(out) > 0) {
 
 ## LASSO - without scores - without surgery
 
-- Use LASSO logistic regression not based on previous gradings.
-- Exclude surgery from the mix
+- Use LASSO logistic regression not based on previous gradings
+- Exclude surgery from the features because it's highly correlated with outcome
 
 ```{r}
 # Set seed
@@ -3204,7 +3245,7 @@ if (any(colnames(X) %in% "is_surgeryTRUE")) {
   
   # Extract coef for a given lambda - avoid the intercept term
   lambda <- best_lambda_min
-  n <- nrow(y)
+  n <- length(y)
   beta <- coef(
     x = X,
     y = y,
@@ -3227,7 +3268,7 @@ if (any(colnames(X) %in% "is_surgeryTRUE")) {
     y = y,
     beta = beta,
     lambda = lambda,
-    # Level of significance
+    # Level of significance (0.1 is 95% CI)
     alpha = 0.1,
     family = "binomial",
     intercept = TRUE,
@@ -3355,7 +3396,7 @@ if (length(out) > 0) {
 ## LASSO - without components - without surgery
 
 - Use LASSO logistic regression based on previous gradings
-- Exclude surgery from the mix because it's too predictive
+- Exclude surgery from the features because it's highly correlated with outcome
 
 ```{r}
 # Set seed
@@ -3407,7 +3448,7 @@ if (any(colnames(X) %in% "is_surgeryTRUE")) {
   
   # Extract coef for a given lambda - avoid the intercept term
   lambda <- best_lambda_min
-  n <- nrow(y)
+  n <- length(y)
   beta <- coef(
     x = X,
     y = y,
@@ -3430,7 +3471,7 @@ if (any(colnames(X) %in% "is_surgeryTRUE")) {
     y = y,
     beta = beta,
     lambda = lambda,
-    # Level of significance
+    # Level of significance (0.1 is 95% CI)
     alpha = 0.1,
     family = "binomial",
     intercept = TRUE,
@@ -3564,6 +3605,7 @@ if (length(out) > 0) {
   plots$odds_ratios_without_components_no_surgery
 }
 ```
+
 
 ------------------------------------------------------------------------
 
@@ -4449,8 +4491,8 @@ varimp %>%
   )
 ```
 
-------------------------------------------------------------------------
 
+------------------------------------------------------------------------
 
 # Multivariable - With interactions
 
@@ -4896,65 +4938,6 @@ df_uni %>%
     pct_patients = scales::percent(num_patients / sum(num_patients), 1)
   ) %>%
   sable()
-```
-
-
-------------------------------------------------------------------------
-
-# Honest esitmation (WIP)
-
-https://www.pnas.org/doi/full/10.1073/pnas.1510489113
-
-https://arxiv.org/pdf/1510.04342
-
-https://github.com/grf-labs/grf
-
-https://grf-labs.github.io/grf/REFERENCE.html
-
-https://cran.r-project.org/web/packages/hettx/vignettes/detect_idiosyncratic_vignette.html
-
-
-```{r eval=FALSE, include=FALSE}
-library(grf)
-```
-
-
-```{r eval=FALSE, include=FALSE}
-# Generate data.
-n <- 2000
-p <- 10
-X <- matrix(rnorm(n * p), n, p)
-X.test <- matrix(0, 101, p)
-X.test[, 1] <- seq(-2, 2, length.out = 101)
-
-# Train a causal forest.
-W <- rbinom(n, 1, 0.4 + 0.2 * (X[, 1] > 0))
-Y <- pmax(X[, 1], 0) * W + X[, 2] + pmin(X[, 3], 0) + rnorm(n)
-tau.forest <- causal_forest(X, Y, W)
-
-# Estimate treatment effects for the training data using out-of-bag prediction.
-tau.hat.oob <- predict(tau.forest)
-hist(tau.hat.oob$predictions)
-
-# Estimate treatment effects for the test sample.
-tau.hat <- predict(tau.forest, X.test)
-plot(X.test[, 1], tau.hat$predictions, ylim = range(tau.hat$predictions, 0, 2), xlab = "x", ylab = "tau", type = "l")
-lines(X.test[, 1], pmax(0, X.test[, 1]), col = 2, lty = 2)
-
-# Estimate the conditional average treatment effect on the full sample (CATE).
-average_treatment_effect(tau.forest, target.sample = "all")
-
-# Estimate the conditional average treatment effect on the treated sample (CATT).
-average_treatment_effect(tau.forest, target.sample = "treated")
-
-# Add confidence intervals for heterogeneous treatment effects; growing more trees is now recommended.
-tau.forest <- causal_forest(X, Y, W, num.trees = 4000)
-tau.hat <- predict(tau.forest, X.test, estimate.variance = TRUE)
-sigma.hat <- sqrt(tau.hat$variance.estimates)
-plot(X.test[, 1], tau.hat$predictions, ylim = range(tau.hat$predictions + 1.96 * sigma.hat, tau.hat$predictions - 1.96 * sigma.hat, 0, 2), xlab = "x", ylab = "tau", type = "l")
-lines(X.test[, 1], tau.hat$predictions + 1.96 * sigma.hat, col = 1, lty = 2)
-lines(X.test[, 1], tau.hat$predictions - 1.96 * sigma.hat, col = 1, lty = 2)
-lines(X.test[, 1], pmax(0, X.test[, 1]), col = 2, lty = 1)
 ```
 
 
