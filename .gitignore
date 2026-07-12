@@ -1,11 +1,14 @@
 # Directories
 data
+docs
 outputs
+outputs_shared
 publication
 
 # R files
 .Rhistory
 .Rproj.user
+.RData
 
 # Mac files
 *.DS_Store
