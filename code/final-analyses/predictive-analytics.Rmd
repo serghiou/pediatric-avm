@@ -1,0 +1,3076 @@
+---
+title: 'Predictive analytics: `r params$TITLE`'
+author: "Stylianos Serghiou"
+date: '`r format(Sys.time(), "%d/%m/%Y")`'
+params:
+  PROPORTION_OF_DATA:
+    label: "Proportion of data to use"
+    value: 1
+    input: slider
+    min: 0
+    max: 1
+    step: 0.05
+    sep: ""
+  CONFIG: 
+    label: "Config file name"
+    value: "config_is-poor-outcome.R"
+    input: select
+    choices: [
+      "config_is-poor-outcome.R",
+      "config_is-poor-outcome_haemTRUE.R",
+      "config_is-poor-outcome_haemFALSE.R",
+      "config_has-complication-major.R",
+      "config_has-complication-minor.R",
+      "config_is-obliterated.R"
+    ]
+  TITLE:
+    label: "Outcome title"
+    value: "Poor outcomes"
+    input: select
+    choices: [
+      "Poor outcome",
+      "Poor outcome - Hemorrhage",
+      "Poor outcome - No Hemorrhage",
+      "Complications - Major",
+      "Complications - Minor",
+      "Obliterated"
+    ]
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    df_print: kable    # obviates %>% kable; does not replace styling though
+    code_folding: hide # [hide, show] (comment out to not give option)
+  pdf_document:
+    highlight: tango
+    df_print: kable
+    latex_engine: pdflatex
+    keep_tex: yes
+  tufte::tufte_handout: default
+  tufte::tufte_html: 
+    toc: TRUE
+  prettydoc::html_pretty:
+    # no cold_folding available
+    theme: hpstr      # or: architect; https://github.com/yixuan/prettydoc
+    highlight: github # or: vignette
+    toc: TRUE         # no toc_float available
+    df_print: kable   # obviates %>% kable; does not replace styling though
+header-includes:
+- \DeclareUnicodeCharacter{3B8}{~}
+- \DeclareUnicodeCharacter{3B1}{~}
+- \DeclareUnicodeCharacter{3B2}{~}
+- \DeclareUnicodeCharacter{223C}{~}
+- \DeclareUnicodeCharacter{2264}{~}
+- \DeclareUnicodeCharacter{2265}{~}
+- \DeclareUnicodeCharacter{2581}{~}
+- \DeclareUnicodeCharacter{2582}{~}
+- \DeclareUnicodeCharacter{2583}{~}
+- \DeclareUnicodeCharacter{2585}{~}
+- \DeclareUnicodeCharacter{2586}{~}
+- \DeclareUnicodeCharacter{2587}{~}
+- \DeclareUnicodeCharacter{FB00}{~}
+- \usepackage{graphicx}
+editor_options: 
+  chunk_output_type: inline
+---
+
+<style>
+p {
+
+text-align: justify;
+text-justify: interword;
+padding: 0 0 0.5em 0
+
+}
+</style>
+
+```{r knitr, echo=FALSE}
+# Load packages
+library(knitr)
+library(rmdformats)
+library(kableExtra)
+library(ggplot2)
+library(magrittr)
+
+
+######### knitr
+
+# Define chunk options
+opts_chunk$set(
+  echo = T,
+  cache = F, # if TRUE, no need to rerun chunks
+  # cache.lazy = TRUE,  # use with big objects (>1 GB)
+  cache.comments = F, # do not rebuild if comments change
+  tidy = F, # can play with this
+  warning = F,
+  message = F,
+  comment = NA,
+  fig.align = "center",
+  fig.width = 7,
+  fig.path = file.path(tempdir(), "../../outputs/predictive-analytics/figs/"),
+  # fig.path = "../../outputs/predictive-analytics/figs/", # export all figures
+  linewidth = 91,
+  width = 75
+)
+
+# Initiatialize hook
+hook_output <- knit_hooks$get("output")
+
+# Hook to wrap output text when it exceeds 'n' using linewidth
+knit_hooks$set(output = function(x, options) {
+  if (!is.null(n <- options$linewidth)) {
+    x <- knitr:::split_lines(x)
+
+    # wrap lines wider than 'n'
+    if (any(nchar(x) > n)) {
+      x <- strwrap(x, width = n)
+    }
+    x <- paste(x, collapse = "\n")
+  }
+  hook_output(x, options)
+})
+
+# Times a chunk and prints the time it took to run it under the chunk
+# To time a chunk, include in the chunk options: {r my_chunk, timeit=TRUE}
+knitr::knit_hooks$set(timeit = local({
+  now <- NULL
+  function(before, options) {
+    if (before) {
+      now <<- Sys.time()
+    } else {
+      res <- difftime(Sys.time(), now)
+      now <<- NULL
+      # use options$label if you want the chunk label as well
+      paste("Time for this code chunk:", as.character(res))
+    }
+  }
+}))
+
+# For more knitr options visit: https://yihui.name/knitr/options/
+# and his github page: https://github.com/yihui/knitr-examples
+
+
+######### kableExtra
+
+options(
+  knitr.kable.NA = "", # replace NAs in tables with blank
+  digits = 5 # round digits (doesn't work without this here!)
+)
+
+## Example use
+# data.frame(x = c(1,2,3), y = c(4,5,6), z = c(7,8,9)) %>%
+#   kable(booktabs = T) %>% kable_styling()
+
+# Function to simplify table styling
+sable <- function(tab, escape = T, full_width = F, drop = F, font_size = 12) {
+  if (drop) {
+    tab %>%
+      kable(escape = escape, booktabs = T) %>%
+      collapse_rows(valign = "top") %>%
+      kable_styling(
+        "striped",
+        position = "center",
+        full_width = full_width,
+        font_size = font_size
+      )
+  } else {
+    tab %>%
+      kable(escape = escape, booktabs = T) %>%
+      kable_styling(
+        "striped",
+        position = "center",
+        full_width = full_width,
+        font_size = font_size
+      )
+  }
+}
+
+## Guidelines
+# No longer need to define options(knitr.table.format = "html"). It is now automatically done as soon as you load kableExtra
+# No need to run kable() every time - done automatically as soon as you load kableExtra
+# Loading kableExtra nullifies any styling applied by df_table: kable in the preamble - if you are content with standard formatting, DO NOT load kableExtra
+
+
+#########  ggplot2
+
+# Set up preferred theme in ggplot2
+my_theme <-
+  # this and theme_minimal() are my favorite
+  theme_light() +
+  theme(
+    axis.ticks = element_blank(),
+    axis.title = element_text(face = "bold"),
+    axis.title.x = element_text(margin = margin(t = 15)),
+    axis.title.y = element_text(margin = margin(r = 7)),
+    legend.key = element_rect(colour = NA, fill = NA), # Avoid borders
+    panel.border = element_blank(),
+    text = element_text(color = "grey20"),
+    title = element_text(face = "bold")
+  )
+
+# Make the above theme the default theme
+original_theme <- theme_set(my_theme)
+
+# Use ggplot2::ggsave to save plots after plotting - this reduces size dramatically
+
+
+######### Tabbed sections
+
+# You can organize content using tabs by applying the .tabset class attribute to headers within a document. This will cause all sub-headers of the header with the .tabset attribute to appear within tabs rather than as standalone sections. For example:
+
+## Quarterly Results {.tabset}
+
+### By Product
+
+
+######### Update package
+
+# To update the package use:
+# devtools::install_github(serghiou/serghioutemplates)
+```
+
+
+# Thoughts
+
+## Questions
+
+- What deficit are we talking about? Is it covered by the mRS?
+- Should the pre-treatment mRS be in the model? Already covered by the others?
+
+
+## Backlog
+
+- Honest estimation
+- G estimation (using only significant ones to get accurate ORs)
+- Make sure that the number of outcomes (26) is valid.
+- Bootstrap the whole process - how many models include each of the features?
+- The SuSiE method: https://www.biorxiv.org/content/10.1101/501114v1
+- Choose best model with forward/backward exclusion
+- Feature selection with honest estimation + p-value-based + bootstrap
+- Feature selection with honest estimation + LASSO-based + bootstrap
+- Implement PCA to create independent variables and not drop variables
+- Bayesian fitting
+- Change to use tidybayes and tidymodels
+- Use neural networks to fit
+- Consider a time-to-event analysis
+
+
+------------------------------------------------------------------------
+
+# Setup
+
+## Imports
+
+```{r setup}
+# Load packages
+library(furrr)
+library(glmnet)
+library(magrittr)
+library(patchwork)
+library(selectiveInference)
+library(tidyverse)
+
+# Source code
+
+```
+
+
+## Parameters
+
+```{r}
+# Source outcome-specific configs
+source(params$CONFIG)
+
+# Destination locations
+DST_DIRNAME <- paste0("../../outputs/")
+
+# Source locations
+SRC_DIRNAME <- "../../data/3_tidy/patients"
+SRC_BASENAME <- "patients-daily_2024-07-21.csv"
+
+# Should the Dockerfile be automatically updated?
+UPDATE_DOCKERFILE <- FALSE
+
+# Parallelize - off by default because it's implemented in the renderer
+PARALLELIZE <- FALSE
+
+# Set the seed
+set.seed(1891)
+```
+
+
+## Variables
+
+```{r}
+EXPOSURES_CONTINUOUS <- c(
+  "Age at 1st treatment (years)" = "age_at_first_treatment_yrs",
+  "mRS (presentation)" = "modified_rankin_score_presentation",
+  "mRS (pre-treatment)" = "modified_rankin_score_pretreatment",
+  "mRS (1-week post-op)" = "modified_rankin_score_postop_within_1_week",
+  "mRS (final)" = "modified_rankin_score_final",
+  "Nidus size (cm)" = "max_size_cm",
+  "Spetzler-Martin grade" = "spetzler_martin_grade",
+  "Lawton-Young grade" = "lawton_young_grade",
+  "Size score" = "size_score"
+)
+
+EXPOSURES_BINARY <- c(
+  "Sex (Male)" = "is_male",
+  "First tx after Jun 2009" = "is_first_tx_after_2009",
+  "First tx as of 2001 onwards" = "is_first_tx_from_2001",
+  "Involves eloquent location" = "is_eloquent_location",
+  "Has deep venous drainage" = "has_deep_venous_drainage",
+  "Diffuse nidus" = "is_diffuse_nidus",
+  "Hemorrhage at presentation" = "has_hemorrhage",
+  "Seizures at presentation" = "has_seizures",
+  "Deficit at presentation" = "has_deficit",
+  "Paresis at presentation" = "has_paresis",
+  "Presence of aneurysms" = "has_associated_aneurysm",
+  "Spetzler-Martin grade < 4" = "is_spetzler_martin_grade_less_than_4",
+  "Had surgery" = "is_surgery"
+)
+
+EXPOSURES_CATEGORICAL <- c(
+  "Location" = "location",
+  "Venous drainage" = "venous_drainage",
+  "Modality of treatment" = "procedure_combinations"
+)
+
+OUTCOMES <- c(
+  "Poor outcome (mRS >= 3)" = "is_poor_outcome",
+  "Obliteration" = "is_obliterated",
+  "Complications - minor" = "has_complication_minor",
+  "Complications - major" = "has_complication_major",
+  "mRS change (final - pre-treatment)" =
+    "modified_rankin_score_final_minus_pretx",
+  "mRS change (final - presentation)" =
+    "modified_rankin_score_final_minus_presentation",
+  "mRS change direction (Final - Pre-tx)" = "change_in_mrs_tx_vs_final"
+)
+```
+
+
+## Outputs
+
+Create lists.
+
+```{r}
+plots <- list()
+tables <- list()
+models <- list()
+```
+
+
+## Functions
+
+### R utils
+
+```{r}
+```
+
+
+### Data analysis utils
+
+Parse inconsistent dates.
+
+```{r}
+# Function to parse dates using the appropriate format
+# (needed b/c some are "%m/%d/%Y" and some "%m/%d/%y")
+parse_inconsistent_dates <- function(date_col) {
+  # Try %m/%d/%y format first
+  parsed_dates <- as.Date(date_col, format = "%m/%d/%Y")
+  
+  # Identify and correct dates before 1950
+  parsed_dates <- ifelse(
+    !is.na(parsed_dates) & parsed_dates < as.Date("1950-01-01"),
+    as.Date(date_col, format = "%m/%d/%y"),
+    parsed_dates
+  )
+  
+  # Return corrected dates
+  as.Date(parsed_dates, origin = "1970-01-01")
+}
+```
+
+
+Descriptive statistics - continuous variables.
+
+```{r}
+compute_descriptive_continuous <- function(
+    df = df_uni,
+    cols = c(EXPOSURES_CONTINUOUS),
+    outcome_col = CHOSEN_OUTCOME,
+    outcome_levels = CHOSEN_OUTCOME_LEVELS,
+    outcome_labels = CHOSEN_OUTCOME_LABELS,
+    use_interaction = TRUE,
+    interaction_col = "has_hemorrhage",
+    interaction_col_name = "Hemorrhage at presentation",
+    interaction_col_value = TRUE,
+    prefix = "Haem") {
+  
+  # Apply desired formatting to numbers
+  format_numbers <- function(x) {
+    sprintf("%.1f", x)
+  }
+
+  # Apply interaction
+  # (keep this selection here to avoid impact of prev. defined interaction_col)
+  if (use_interaction) {
+    # Compute new dataset
+    df <-
+      df %>%
+      select(cols, outcome_col, interaction_col) %>%
+      drop_na(outcome_col, interaction_col) %>% 
+      filter(!!sym(interaction_col) == interaction_col_value)
+  } else {
+    # Compute new dataset
+    df <-
+      df %>%
+      select(cols, outcome_col) %>%
+      drop_na(outcome_col)
+  }
+
+  # Compute descriptive statistics
+  desc_stats <-
+    df %>%
+    pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+    group_by(!!sym(outcome_col), keys) %>%
+    summarize(
+      num_total = n(),
+      num_missing = sum(is.na(values)),
+      mean = mean(values, na.rm = TRUE),
+      sd = sd(values, na.rm = TRUE),
+      min = quantile(values, 0, na.rm = TRUE),
+      max = quantile(values, 1, na.rm = TRUE),
+      q_50 = quantile(values, 0.50, na.rm = TRUE),
+      q_25 = quantile(values, 0.25, na.rm = TRUE),
+      q_75 = quantile(values, 0.75, na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      stats = glue::glue("{format_numbers(mean)} ({format_numbers(sd)})"),
+      !!sym(outcome_col) := factor(
+        !!sym(outcome_col),
+        levels = outcome_levels,
+        labels = outcome_labels
+      )
+    ) %>%
+    pivot_wider(
+      id_cols = keys,
+      names_from = !!sym(outcome_col),
+      values_from = stats
+    ) %>%
+    relocate(outcome_labels[1], .after = outcome_labels[2])
+
+  # Compute p-values
+  pvals <-
+    df %>%
+    pivot_longer(where(is.numeric), names_to = "keys", values_to = "values") %>%
+    group_by(keys) %>%
+    summarize(
+      pvalue = wilcox.test(values ~ !!sym(outcome_col))$p.value
+    )
+
+  # Synthesize
+  out <-
+    desc_stats %>%
+    left_join(pvals)
+
+  # Add sample size to column names
+  # Count each outcome group by its OWN label (robust to level/label order)
+  n_by_label <- setNames(
+    c(
+      sum(df %>% pull(outcome_col) == outcome_levels[1], na.rm = TRUE),
+      sum(df %>% pull(outcome_col) == outcome_levels[2], na.rm = TRUE)
+    ),
+    outcome_labels
+  )
+  # Build headers so each label carries its own n (order matches relocate())
+  new_col_names <- c(
+    glue::glue("{prefix} - {outcome_labels[2]} (n={n_by_label[[outcome_labels[2]]]})"),
+    glue::glue("{prefix} - {outcome_labels[1]} (n={n_by_label[[outcome_labels[1]]]})"),
+    glue::glue("{prefix} - P-value")
+  )
+
+  out <-
+    out %>%
+    rename_with(
+      .cols = !!sym(outcome_labels[2]):pvalue, ~new_col_names
+    ) %>%
+    mutate(
+      keys = ifelse(keys == interaction_col, interaction_col_name, keys)
+    )
+
+  return(out)
+}
+```
+
+
+Descriptive statistics - binary variables.
+
+```{r}
+compute_descriptive_binary <- function(
+    df = df_uni,
+    cols = c(EXPOSURES_BINARY),
+    outcome_col = CHOSEN_OUTCOME,
+    outcome_levels = CHOSEN_OUTCOME_LEVELS,
+    outcome_labels = CHOSEN_OUTCOME_LABELS,
+    use_interaction = TRUE,
+    interaction_col = "has_hemorrhage",
+    interaction_col_name = "Hemorrhage at presentation",
+    interaction_col_value = TRUE,
+    prefix = "Haem") {
+  
+  # Define arguments
+  cols <- c(cols[!cols == interaction_col])
+
+  # Apply desired formatting to numbers
+  format_numbers <- function(x, decimals = 0) {
+    decimals <- paste0("%.", decimals, "f")
+    sprintf(decimals, x)
+  }
+
+  # Compute new dataset
+  df <-
+    df %>%
+    select(all_of(cols), outcome_col, interaction_col) %>%
+    drop_na(outcome_col, interaction_col)
+
+  # Apply interaction
+  if (use_interaction) {
+    df <-
+      df %>%
+      filter(!!sym(interaction_col) == interaction_col_value)
+  }
+
+  # Compute descriptive statistics
+  desc_stats <-
+    df %>%
+    pivot_longer(
+      cols = -c(outcome_col),
+      names_to = "keys",
+      values_to = "values"
+    ) %>%
+    group_by(!!sym(outcome_col), keys) %>%
+    summarize(
+      num_total = n(),
+      num_missing = sum(is.na(values)),
+      num_with = sum(values, na.rm = TRUE),
+      num_without = sum(!values, na.rm = TRUE),
+      pct_with = mean(values, na.rm = TRUE)
+    ) %>%
+    ungroup() %>%
+    mutate(
+      stats = glue::glue("{num_with} ({format_numbers(pct_with*100)}%)"),
+      !!sym(outcome_col) := factor(
+        !!sym(outcome_col),
+        levels = outcome_levels,
+        labels = outcome_labels
+      )
+    ) %>%
+    pivot_wider(
+      id_cols = keys,
+      names_from = !!sym(outcome_col),
+      values_from = stats
+    ) %>%
+    relocate(outcome_labels[1], .after = outcome_labels[2])
+
+  # Compute p-values
+  pvals <-
+    df %>%
+    pivot_longer(
+      cols = -c(outcome_col),
+      names_to = "keys",
+      values_to = "values"
+    ) %>%
+    group_by(keys) %>%
+    summarize(
+      pvalue = kruskal.test(values ~ !!sym(outcome_col))$p.value
+    )
+
+  # Synthesize
+  out <-
+    desc_stats %>%
+    left_join(pvals)
+
+  # Add sample size to column names
+  # Count each outcome group by its OWN label (robust to level/label order)
+  n_by_label <- setNames(
+    c(
+      sum(df %>% pull(outcome_col) == outcome_levels[1], na.rm = TRUE),
+      sum(df %>% pull(outcome_col) == outcome_levels[2], na.rm = TRUE)
+    ),
+    outcome_labels
+  )
+  # Build headers so each label carries its own n (order matches relocate())
+  new_col_names <- c(
+    glue::glue("{prefix} - {outcome_labels[2]} (n={n_by_label[[outcome_labels[2]]]})"),
+    glue::glue("{prefix} - {outcome_labels[1]} (n={n_by_label[[outcome_labels[1]]]})"),
+    glue::glue("{prefix} - P-value")
+  )
+
+  out <-
+    out %>%
+    rename_with(
+      .cols = !!sym(outcome_labels[2]):pvalue, ~new_col_names
+    ) %>%
+    mutate(
+      keys = ifelse(keys == interaction_col, interaction_col_name, keys)
+    )
+
+  return(out)
+}
+```
+
+### Predictive analytics utils
+
+
+
+
+------------------------------------------------------------------------
+
+# Read
+
+```{r}
+# File path
+filepath <- file.path(SRC_DIRNAME, SRC_BASENAME)
+
+# Read
+patients_ <-
+  read_csv(
+    filepath,
+    col_types = cols(
+      .default = col_guess(), # Default behavior for other columns
+      date_first_treatment = col_character()
+    )
+  ) %>%
+  dplyr::sample_frac(params$PROPORTION_OF_DATA)
+
+# If analyzing a subset of the data, restrict the dataset
+if (params$TITLE == "Poor outcome - Hemorrhage") {
+  patients_ <- patients_ %>% filter(has_hemorrhage)
+}
+if (params$TITLE == "Poor outcome - No Hemorrhage") {
+  patients_ <- patients_ %>% filter(!has_hemorrhage)
+}
+if (params$TITLE == "Poor outcome - High grade") {
+  patients_ <- patients_ %>% filter(spetzler_martin_grade >= 4)
+}
+if (params$TITLE == "Poor outcome - Low grade") {
+  patients_ <- patients_ %>% filter(spetzler_martin_grade < 4)
+}
+```
+
+
+------------------------------------------------------------------------
+
+# Conform
+
+## Setup
+
+Remove all empty rows.
+
+```{r}
+patients_ <-
+  patients_ %>%
+  filter(!is.na(patient_id)) %>%
+  arrange(patient_id)
+```
+
+
+Create two dataframes - one for univariable and one for multivariable analysis. This is because variables for multivariable analysis will be recoded to reduce the number of levels to avoid overfitting the model.
+
+```{r}
+df_uni <-
+  patients_ %>%
+  filter(is_eligible) %>% 
+  filter(!is.na(spetzler_martin_grade))
+
+df_multi <-
+  patients_ %>%
+  filter(is_eligible) %>% 
+  filter(!is.na(spetzler_martin_grade))
+```
+
+
+## Recode columns
+
+For `venous_drainage` if "Both", mark as "Deep."
+
+```{r}
+df_multi <-
+  df_multi %>%
+  mutate(
+    venous_drainage = ifelse(venous_drainage == "Both", "Deep", venous_drainage)
+  )
+```
+
+
+For `procedure_combinations`, change > 1 to multimodal to reduce levels.
+
+```{r}
+df_multi <-
+  df_multi %>%
+  mutate(procedure_combinations = case_when(
+    nchar(procedure_combinations) > 1 ~ "Multimodal",
+    .default = procedure_combinations
+  ))
+```
+
+
+For `procedure_combinations`, indicate if surgery-based or not.
+
+```{r}
+df_multi <-
+  df_multi %>%
+  mutate(
+    is_surgery = str_detect(procedure_combinations, "S")
+  ) %>%
+  relocate(is_surgery, .after = procedure_combinations)
+
+df_uni <-
+  df_uni %>%
+  mutate(
+    is_surgery = str_detect(procedure_combinations, "S")
+  ) %>%
+  relocate(is_surgery, .after = procedure_combinations)
+```
+
+
+For `location`, reduce levels (use "Other").
+
+```{r}
+df_multi <-
+  df_multi %>%
+  mutate(
+    location = ifelse(location == "Corpus Callosum", "Other", location),
+    location = ifelse(location == "Cerebellum", "Other", location),
+    # location = ifelse(location == "Deep", "Other", location),
+    location = factor(location),
+    location = relevel(location, ref = "Other")
+  )
+```
+
+
+For `spetzler_martin_grade`, create a binary variant of 1-3 vs. 4-5.
+
+```{r}
+# For multivariable analysis
+df_multi <-
+  df_multi %>%
+  mutate(
+    # Divides into low grade vs. high grade
+    is_spetzler_martin_grade_less_than_4 = spetzler_martin_grade < 4
+  ) %>%
+  relocate(is_spetzler_martin_grade_less_than_4, .after = spetzler_martin_grade)
+
+# For univariable analysis
+df_uni <-
+  df_uni %>%
+  mutate(
+    is_spetzler_martin_grade_less_than_4 = spetzler_martin_grade < 4
+  ) %>%
+  relocate(is_spetzler_martin_grade_less_than_4, .after = spetzler_martin_grade)
+```
+
+
+For `date_first_treatment`,transform into dates and create > 2009 vs. not.
+
+```{r}
+# Parse into Date format and create dichotomous variable
+df_uni <-
+  df_uni %>%
+  mutate(across(starts_with("date"), ~ parse_inconsistent_dates(.x))) %>% 
+  mutate(is_first_tx_after_2009 = 
+           date_first_treatment >= as.Date("2009-06-30")) %>%
+  mutate(is_first_tx_from_2001 =
+           date_first_treatment >= as.Date("2001-01-01"))
+
+# Fix dates and parse into Date format
+df_multi <-
+  df_multi %>%
+  mutate(across(starts_with("date"), ~ parse_inconsistent_dates(.x))) %>% 
+  mutate(is_first_tx_after_2009 = 
+           date_first_treatment >= as.Date("2009-06-30")) %>%
+  mutate(is_first_tx_from_2001 =
+           date_first_treatment >= as.Date("2001-01-01"))
+
+# Check for missingness
+num_missing <-
+  df_uni %>% 
+  filter(is.na(date_first_treatment)) %>% 
+  pull(patient_id) %>% 
+  length()
+
+ids_missing <- 
+  df_uni %>%
+  filter(is.na(date_first_treatment)) %>% 
+  pull(patient_id)
+
+# Check for non-sensical data
+min(df_uni$date_first_treatment, na.rm = T) > as.Date("1980-01-01")
+max(df_uni$date_first_treatment, na.rm = T) < as.Date("2025-01-01")
+```
+
+
+## Missingness
+
+```{r}
+# Get cols
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  "is_first_tx_after_2009",
+  "is_first_tx_from_2001",
+  EXPOSURES_CATEGORICAL,
+  OUTCOMES
+))
+
+# Count missingness
+df_multi %>%
+  select(cols) %>%
+  summarise_all(~ sum(is.na(.))) %>%
+  pivot_longer(everything(), values_to = "num_missing") %>%
+  arrange(desc(num_missing)) %>%
+  filter(num_missing > 0) %>%
+  sable()
+```
+
+
+Which eligible patients are missing each variable?
+
+```{r}
+df_multi %>%
+  filter(is_eligible) %>%
+  select(mrn, cols) %>%
+  mutate(across(-mrn, is.na)) %>%
+  pivot_longer(
+    cols = -mrn,
+    names_to = "name",
+    values_to = "is_missing"
+  ) %>%
+  filter(is_missing) %>%
+  group_by(name) %>%
+  summarize(mrn = str_c(mrn, collapse = ", ")) %>%
+  sable()
+```
+
+
+------------------------------------------------------------------------
+
+# Visualizations
+
+## Overall
+
+Distribution of values of the exposures across levels of the outcome.
+
+```{r, fig.width=12, fig.height=8}
+# Define the predictors of interest
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  CHOSEN_OUTCOME
+)
+
+# Reshape the data
+df_long <-
+  df_uni %>%
+  select(all_of(cols)) %>%
+  pivot_longer(-CHOSEN_OUTCOME, names_to = "predictor", values_to = "value")
+
+# Plot the box plots
+df_long %>%
+  ggplot(aes_string(
+    x = CHOSEN_OUTCOME,
+    y = "value",
+    fill = CHOSEN_OUTCOME,
+    color = CHOSEN_OUTCOME
+  )) +
+  geom_boxplot(alpha = 0.5) +
+  facet_wrap(~predictor, scales = "free") +
+  labs(x = "Outcome", y = "Value", fill = "Outcome") +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11),
+    strip.text = element_text(size = 11),
+    legend.position = "none"
+  )
+```
+
+
+## By hemorrhage
+
+```{r, fig.width=14, fig.height=12}
+# Define the predictors of interest
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  CHOSEN_OUTCOME
+)
+
+# Reshape the data
+df_long <-
+  df_uni %>%
+  select(all_of(cols)) %>%
+  pivot_longer(
+    cols = -c(CHOSEN_OUTCOME, `Hemorrhage at presentation`),
+    names_to = "predictor",
+    values_to = "value"
+  )
+
+# Plot the box plots
+df_long %>%
+  ggplot(aes_string(
+    x = CHOSEN_OUTCOME,
+    y = "value",
+    fill = "`Hemorrhage at presentation`",
+    color = "`Hemorrhage at presentation`"
+  )) +
+  geom_boxplot(alpha = 0.5) +
+  facet_wrap(~predictor, scales = "free") +
+  labs(x = "Outcome", y = "Value", fill = "Outcome") +
+  theme_minimal() +
+  guides(fill = "none") +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11),
+    strip.text = element_text(size = 11)
+  )
+```
+
+
+## By SM grade high vs. low
+
+```{r, fig.width=14, fig.height=12}
+# Define the predictors of interest
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  CHOSEN_OUTCOME
+)
+
+# Reshape the data
+df_long <-
+  df_uni %>%
+  select(all_of(cols)) %>%
+  pivot_longer(
+    cols = -c(CHOSEN_OUTCOME, `Spetzler-Martin grade < 4`),
+    names_to = "predictor",
+    values_to = "value"
+  )
+
+# Plot the box plots
+df_long %>%
+  ggplot(aes_string(
+    x = CHOSEN_OUTCOME,
+    y = "value",
+    fill = "`Spetzler-Martin grade < 4`",
+    color = "`Spetzler-Martin grade < 4`"
+  )) +
+  geom_boxplot(alpha = 0.5) +
+  facet_wrap(~predictor, scales = "free") +
+  labs(x = "Outcome", y = "Value", fill = "Outcome") +
+  theme_minimal() +
+  guides(fill = "none") +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 11),
+    strip.text = element_text(size = 11)
+  )
+```
+
+
+## Specialty
+
+### SM grade vs. complications
+
+```{r}
+# Rename
+complications <- c(
+  has_complication_minor = "Minor",
+  has_complication_major = "Major"
+)
+
+# Create table for plotting
+t <- 
+  df_uni %>% 
+  filter(is_eligible) %>% 
+  select(
+    patient_id,
+    spetzler_martin_grade,
+    has_complication_minor,
+    has_complication_major
+  ) %>% 
+  pivot_longer(starts_with("has_complication")) %>% 
+  group_by(spetzler_martin_grade, name) %>% 
+  summarize(
+    num_patients = sum(value, na.rm = T)
+  ) %>% 
+  group_by(name) %>% 
+  mutate(pct_patients = num_patients / sum(num_patients))
+
+# Create figure
+plots$sm_grade_vs_complications_bar_chart <- 
+  t %>%
+  mutate(name = factor(name, names(complications), complications)) %>% 
+  ggplot(aes(
+    x = spetzler_martin_grade,
+    y = pct_patients,
+    color = name,
+    fill = name)
+  ) +
+  geom_col(
+    position = position_dodge(width = 0.8),
+    width = 0.7
+  ) +
+  geom_label(
+    aes(label = num_patients),
+    position = position_dodge(width = 0.8),
+    vjust = -0.2,
+    size = 3,
+    fill = "white",
+    label.size = NA,  # Removes the label border
+    show.legend = FALSE
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.1))
+  ) +
+  scale_fill_manual(values = c("Minor" = "#00BFC4", "Major" = "#F8766D")) +
+  scale_color_manual(values = c("Minor" = "#00BFC4", "Major" = "#F8766D")) +
+  labs(
+    x = "Spetzler-Martin Grade",
+    y = "Patients (%)",
+    fill = "Complications",
+    color = "Complications"
+  ) +
+  theme(
+    legend.position = c(0.3, 0.95),
+    legend.justification = c("right", "top")
+  )
+  
+# Plot
+plots$sm_grade_vs_complications_bar_chart
+```
+
+
+## By date
+
+Every 1 year.
+
+```{r}
+# Create table
+df_by_date <-
+  df_uni %>%
+  filter(!is.na(date_first_treatment)) %>% 
+  mutate(year_first_treatment = format(date_first_treatment, "%Y")) %>% 
+  group_by(year_first_treatment) %>% 
+  summarize(
+    num_patients = n(),
+    num_poor_outcome = sum(is_poor_outcome, na.rm = T),
+    pct_poor_outcome = 100 * num_poor_outcome / num_patients
+  )
+
+df_by_date %>% 
+  ggplot(aes(x = year_first_treatment, y = pct_poor_outcome)) +
+  geom_col() +
+  geom_text(
+    aes(
+      label = paste0(num_poor_outcome, "/", num_patients)
+    ),
+    size = 2,
+    vjust = -0.5  # Adjust vertical position above the bar
+  ) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1.5, vjust = 2.5)
+  ) +
+  labs(
+    x = "Year of First Treatment",
+    y = "Poor outcomes (%)",
+    title = "Percentage of Poor Outcomes by Year"
+  )
+```
+
+
+Every 5 years.
+
+```{r}
+# Create table
+df_by_date <-
+  df_uni %>%
+  filter(!is.na(date_first_treatment)) %>% 
+  mutate(year_first_treatment = as.numeric(format(date_first_treatment, "%Y"))) %>%
+  mutate(
+    year_interval = paste0(
+      floor(year_first_treatment / 5) * 5,
+      "-",
+      floor(year_first_treatment / 5) * 5 + 4
+    )
+  ) %>% 
+  group_by(year_interval) %>% 
+  summarize(
+    num_patients = n(),
+    num_poor_outcome = sum(is_poor_outcome, na.rm = T),
+    pct_poor_outcome = 100 * num_poor_outcome / num_patients
+  )
+
+# Visualize
+df_by_date %>% 
+  ggplot(aes(x = year_interval, y = pct_poor_outcome)) +
+  geom_col() +
+  geom_text(
+    aes(
+      label = paste0(num_poor_outcome, "/", num_patients)
+    ),
+    size = 3,
+    vjust = -0.5  # Adjust vertical position above the bar
+  ) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 1)
+  ) +
+  labs(
+    x = "Year of First Treatment",
+    y = "Poor outcomes (%)",
+    title = "Percentage of Poor Outcomes by Year"
+  )
+```
+
+
+Every 5 years.
+
+```{r, fig.height=6, fig.width=6}
+# Create table
+df_by_date <-
+  df_uni %>%
+  filter(!is.na(date_first_treatment)) %>% 
+  mutate(year_first_treatment = as.numeric(format(date_first_treatment, "%Y"))) %>%
+  mutate(
+    year_interval = paste0(
+      floor(year_first_treatment / 10) * 10,
+      "-",
+      floor(year_first_treatment / 10) * 10 + 9
+    )
+  ) %>% 
+  group_by(year_interval) %>% 
+  summarize(
+    num_patients = n(),
+    num_poor_outcome = sum(is_poor_outcome, na.rm = T),
+    pct_poor_outcome = 100 * num_poor_outcome / num_patients
+  )
+
+# Visualize
+df_by_date %>% 
+  ggplot(aes(x = year_interval, y = pct_poor_outcome)) +
+  geom_col() +
+  geom_text(
+    aes(
+      label = paste0(num_poor_outcome, "/", num_patients)
+    ),
+    size = 3,
+    vjust = -0.5  # Adjust vertical position above the bar
+  ) +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 1)
+  ) +
+  labs(
+    x = "Year of First Treatment",
+    y = "Poor outcomes (%)",
+    title = "Percentage of Poor Outcomes by Year"
+  )
+```
+
+
+------------------------------------------------------------------------
+
+# Descriptive statistics
+
+## Setup
+
+```{r}
+
+```
+
+
+## Non-specific
+
+```{r}
+# Rename dataframe
+`Pediatric AVMs` <-
+  df_uni %>%
+  filter(is_eligible) %>%
+  select(-is_eligible, -comments)
+
+# Create summary
+`Pediatric AVMs` %>%
+  summarytools::dfSummary(display.labels = FALSE) %>%
+  print(
+    file =
+      "../../outputs/descriptive-statistics/descriptive_statistics_eligible.html",
+    footnote = NA
+  )
+
+# Remove unwanted dataframe
+remove(`Pediatric AVMs`)
+```
+
+
+## By hemorrhage - table1
+
+https://cran.r-project.org/web/packages/table1/vignettes/table1-examples.html
+
+```{r eval=FALSE}
+library(table1)
+
+table1::table1(
+  ~ factor(is_male) + age_at_first_treatment_yrs + factor(is_eloquent_location) + max_size_cm | has_hemorrhage,
+  data = df_uni
+)
+```
+
+```{r eval=FALSE}
+# Initialize values
+df <- df_uni
+
+# Remove missing values in stratification variables
+df <-
+  df %>%
+  drop_na(has_hemorrhage, CHOSEN_OUTCOME)
+
+# Define columns
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  OUTCOMES[OUTCOMES == CHOSEN_OUTCOME]
+)
+
+# Assign labels to the variables in the dataframe
+for (var in cols) {
+  label(df[[var]]) <- names(cols[cols == var])
+}
+
+# Assign meaningful labels to the has_hemorrhage variable
+df$has_hemorrhage <- factor(
+  df$has_hemorrhage,
+  levels = c(FALSE, TRUE),
+  labels = c("No Hemorrhage", "Has Hemorrhage")
+)
+
+df[, CHOSEN_OUTCOME] <- factor(
+  df %>% pull(CHOSEN_OUTCOME),
+  levels = CHOSEN_OUTCOME_LEVELS,
+  labels = CHOSEN_OUTCOME_LABELS
+)
+
+# Define custom rendering functions if needed
+render_continuous <- function(x) {
+  with(stats.apply.rounding(stats.default(x), digits = 2), c(
+    "Mean (SD)" = sprintf("%s (&plusmn; %s)", MEAN, SD),
+    "Median (IQR)" = sprintf("%s (%s - %s)", MEDIAN, Q1, Q3)
+  ))
+}
+
+compute_pvalues <- function(x, ...) {
+  # Construct vectors of data y, and groups (strata) g
+  y <- unlist(x)
+  g <- factor(rep(1:length(x), times = sapply(x, length)))
+  if (is.numeric(y)) {
+    # For numeric variables, perform a standard 2-sample t-test
+    p <- t.test(y ~ g)$p.value
+  } else {
+    # For categorical variables, perform a chi-squared test of independence
+    p <- chisq.test(table(y, g))$p.value
+  }
+  # Format the p-value, using an HTML entity for the less-than sign.
+  # The initial empty string places the output on the line below the variable label.
+  c("", sub("<", "&lt;", format.pval(p, digits = 3, eps = 0.001)))
+}
+
+# Create the descriptive table
+frla <- as.formula(paste("~ . | has_hemorrhage *", CHOSEN_OUTCOME))
+
+# Create table
+table1_descriptive_statistics <-
+  table1(frla,
+    data = df[, unname(cols)],
+    render.continuous = render_continuous,
+    overall = c(left = "Overall"),
+    topclass = "Rtable1-zebra"
+  )
+
+# Print
+table1_descriptive_statistics
+```
+
+
+## By hemorrhage
+
+```{r}
+if (!str_detect(params$TITLE, "Hemorrhage")) {
+  
+  # Define arguments
+  interaction_col <- "has_hemorrhage"
+  interaction_col_name <- "Hemorrhage at presentation"
+  prefix_true <- "Haem"
+  prefix_false <- "No Haem"
+  
+  # Get all
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = F,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = "All"
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = F,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = "All"
+  )
+  out_all <- bind_rows(out)
+  
+  # Get with hemorrhage
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = prefix_true
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = prefix_true
+  )
+  out_haem <- bind_rows(out)
+  
+  # Get without hemorrhage
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = F,
+    prefix = prefix_false
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = F,
+    prefix = prefix_false
+  )
+  out_no_haem <- bind_rows(out)
+  
+  # Synthesize
+  out_complete <-
+    out_all %>%
+    left_join(out_haem, by = "keys") %>%
+    left_join(out_no_haem, by = "keys") %>%
+    arrange(`All - P-value`)
+  
+  # Print
+  out_complete %>%
+    sable()
+  
+}
+```
+
+
+## By diffuse nidus
+
+```{r}
+# Define arguments
+interaction_col <- "is_diffuse_nidus"
+interaction_col_name <- "Is diffuse nidus"
+prefix_true <- "Diffuse"
+prefix_false <- "Not Diffuse"
+
+# Get all
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out_all <- bind_rows(out)
+
+# Get with hemorrhage
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = prefix_true
+)
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = prefix_true
+)
+out_haem <- bind_rows(out)
+
+# Get without hemorrhage
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = F,
+  prefix = prefix_false
+)
+out[[2]] <- compute_descriptive_binary(
+  use_interaction = T,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = F,
+  prefix = prefix_false
+)
+out_no_haem <- bind_rows(out)
+
+# Synthesize
+out_complete <-
+  out_all %>%
+  left_join(out_haem, by = "keys") %>%
+  left_join(out_no_haem, by = "keys") %>%
+  arrange(`All - P-value`)
+
+# Print
+out_complete %>%
+  sable()
+```
+
+
+## By SM grade high vs. low
+
+```{r}
+if (!str_detect(params$TITLE, "grade")) {
+  # Define arguments
+  interaction_col <- "is_spetzler_martin_grade_less_than_4"
+  interaction_col_name <- "Spetzler-Martin grade < 4"
+  prefix_true <- "Low grade"
+  prefix_false <- "High grade"
+  
+  # Get all
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = F,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = "All"
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = F,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = "All"
+  )
+  out_all <- bind_rows(out)
+  
+  # Get with
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = prefix_true
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = T,
+    prefix = prefix_true
+  )
+  out_haem <- bind_rows(out)
+  
+  # Get without
+  out <- list()
+  out[[1]] <- compute_descriptive_continuous(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = F,
+    prefix = prefix_false
+  )
+  out[[2]] <- compute_descriptive_binary(
+    use_interaction = T,
+    interaction_col = interaction_col,
+    interaction_col_name = interaction_col_name,
+    interaction_col_value = F,
+    prefix = prefix_false
+  )
+  out_no_haem <- bind_rows(out)
+  
+  # Synthesize
+  out_complete <-
+    out_all %>%
+    left_join(out_haem, by = "keys") %>%
+    left_join(out_no_haem, by = "keys") %>%
+    arrange(`All - P-value`)
+  
+  # Print
+  out_complete %>%
+    sable()
+}
+```
+
+
+## By date
+
+These values represent either the mean (continuous) or number and proportion (binary) of patients with the specific exposure before or after 2009. For example, for Spetzler-Martin grade < 4, the numbers represent the number and proportion of patients with SM 1-3 before vs. after 2009.
+
+```{r}
+# Define arguments
+outcome_col <- "is_first_tx_after_2009"
+outcome_levels <- c(TRUE, FALSE)
+outcome_labels <- c("After Jun '09", "At or before Jun '09")
+avoid_columns <- c("is_first_tx_from_2001", "is_first_tx_after_2009")
+
+# Get all
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  outcome_col = outcome_col,
+  outcome_levels = outcome_levels,
+  outcome_labels = outcome_labels,
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out[[2]] <- compute_descriptive_binary(
+  cols = EXPOSURES_BINARY[!EXPOSURES_BINARY %in% avoid_columns],
+  outcome_col = outcome_col,
+  outcome_levels = outcome_levels,
+  outcome_labels = outcome_labels,
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out_all <- bind_rows(out)
+
+# Synthesize
+out_complete <-
+  out_all %>%
+  arrange(`All - P-value`)
+
+# Print
+out_complete %>%
+  sable()
+```
+
+
+New analysis (as of Jul 8, 2026) to understand poor outcomes before and after 2001 by SM grade.
+
+These values represent either the mean (continuous) or number and proportion (binary) of patients with the specific exposure before or after 2001. For example, for Spetzler-Martin grade < 4, the numbers represent the number and proportion of patients with SM 1-3 before vs. after 2001.
+
+```{r}
+# Define arguments
+outcome_col <- "is_first_tx_from_2001"
+outcome_levels <- c(TRUE, FALSE)
+outcome_labels <- c("2001 onwards", "Before 2001")
+avoid_columns <- c("is_first_tx_from_2001", "is_first_tx_after_2009")
+
+# Get all
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  outcome_col = outcome_col,
+  outcome_levels = outcome_levels,
+  outcome_labels = outcome_labels,
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out[[2]] <- compute_descriptive_binary(
+  cols = EXPOSURES_BINARY[!EXPOSURES_BINARY %in% avoid_columns],
+  outcome_col = outcome_col,
+  outcome_levels = outcome_levels,
+  outcome_labels = outcome_labels,
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out_all <- bind_rows(out)
+
+# Synthesize
+out_complete <-
+  out_all %>%
+  arrange(`All - P-value`)
+
+# Print
+out_complete %>%
+  sable()
+```
+
+
+```{r}
+if (!str_detect(params$TITLE, "grade")) {
+  
+# One table row for a given data subset; `outcome` is a column name as a string
+era_row <- function(data, group_label, outcome = CHOSEN_OUTCOME) {
+  
+  # Total patients excluded for any missing (era or outcome)
+  missing <- sum(is.na(data$is_first_tx_from_2001) | is.na(data[[outcome]]))
+
+  # Only include cells with data
+  d <-
+    data %>%
+    filter(!is.na(is_first_tx_from_2001))
+  
+  # Fisher's exact test: era (2x2) vs outcome, within this group
+  p <- fisher.test(table(d$is_first_tx_from_2001, d[[outcome]]))$p.value
+  
+  # Create row
+  d %>%
+    mutate(era = factor(
+      if_else(is_first_tx_from_2001, "2001–2024", "1985–2000"),
+      levels = c("1985–2000", "2001–2024")
+    )) %>%
+    group_by(era, .drop = FALSE) %>%
+    summarise(
+      n = sum(.data[[outcome]], na.rm = TRUE),
+      N = sum(!is.na(.data[[outcome]])),
+      .groups = "drop"
+    ) %>%
+    rowwise() %>%
+    mutate(
+      `n (%)`  = if (N > 0) sprintf("%d/%d (%.1f%%)", n, N, 100 * n / N) else "0/0",
+      `95% CI` = if (N > 0) {
+        ci <- binom.test(n, N)$conf.int * 100
+        sprintf("%.1f–%.1f%%", ci[1], ci[2])
+      } else NA_character_
+    ) %>%
+    ungroup() %>%
+    select(era, `n (%)`, `95% CI`) %>%
+    pivot_wider(
+      names_from  = era,
+      values_from = c(`n (%)`, `95% CI`),
+      names_glue  = "{era} {.value}",
+      names_vary  = "slowest"
+    ) %>%
+    mutate(Group = group_label, "Missing era" = missing, .before = 1) %>%
+    mutate(`Fisher p` = format.pval(p, digits = 2, eps = 0.001))
+}
+
+# Create table
+tbl <- bind_rows(
+  era_row(df_uni, "Overall"),
+  era_row(filter(df_uni, is_spetzler_martin_grade_less_than_4), "SM 1–3"),
+  era_row(filter(df_uni, !is_spetzler_martin_grade_less_than_4), "SM 4–5")
+)
+
+# Print table
+sable(tbl)
+}
+```
+
+Interpretation: Poor functional outcome (modified Rankin Scale ≥3) was compared between treatment eras, defined by year of first treatment (1985–2000 vs 2001–2024). Overall, the rate of poor outcome was comparable across eras (6/51 [11.8%] vs 19/170 [11.2%]; Fisher's exact p = 1.00). This pattern was consistent within Spetzler–Martin (SM) grade strata. Among low-grade AVMs (SM 1–3), poor outcome occurred in 3/28 (10.7%) in the earlier era and 7/125 (5.6%) in the later era (p = 0.39). Among high-grade AVMs (SM 4–5), poor outcome occurred in 3/23 (13.0%) versus 12/45 (26.7%); although numerically higher in the later era, this difference did not reach statistical significance (p = 0.23) and was estimated with wide confidence intervals (95% CI 2.8–33.6% and 14.6–41.9%, respectively), reflecting the small number of events. No statistically significant difference in poor-outcome rate by treatment era was observed in any subgroup.
+
+
+------------------------------------------------------------------------
+
+# Associational statistics
+
+## Correlations
+
+Correlation matrix.
+
+```{r, fig.height=8, fig.width=8}
+# Cols
+cols <- c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL,
+  OUTCOMES
+)
+
+# Remove interaction terms
+if (str_detect(params$TITLE, "Hemorrhage")) {
+  cols <- cols[!cols == "has_hemorrhage"]
+}
+if (str_detect(params$TITLE, "grade")) {
+  x <- c("spetzler_martin_grade", "is_spetzler_martin_grade_less_than_4")
+  cols <- cols[!cols %in% x]
+}
+  
+# Create new dataframe
+df_ <-
+  df_uni %>%
+  select(all_of(cols))
+
+# Convert the outcome variable to numeric for correlation calculation
+df_ <-
+  df_ %>%
+  select(where(is.numeric), where(is.logical)) %>%
+  mutate(across(everything(), as.numeric))
+
+# Compute the correlation matrix
+cor_matrix <- cor(df_, use = "complete.obs", method = "spearman")
+
+# Plot the correlation matrix
+ggcorrplot::ggcorrplot(
+  cor_matrix,
+  method = "circle",
+  lab = TRUE,
+  lab_size = 2,
+  colors = c("red", "white", "green4"),
+  title = "Correlation Matrix",
+  hc.order = TRUE,
+) +
+  theme(
+    axis.text.x = element_text(size = 8), # Adjust x-axis text size
+    axis.text.y = element_text(size = 8) # Adjust y-axis text size
+  )
+```
+
+
+------------------------------------------------------------------------
+
+# Univariable statistics
+
+## Setup
+
+Define function.
+
+```{r}
+fit_model <- function(
+    df = df_uni, cols = cols, is_sandwich = T) {
+  # Initialize
+  out <- list()
+
+  for (i in seq_along(cols)) {
+    # Create formula
+    model <- as.formula(paste(CHOSEN_OUTCOME, "~", cols[i]))
+
+    fit <- suppressWarnings(glm(
+      model,
+      data = df,
+      family = binomial()
+    ))
+
+    if (is_sandwich) {
+      # Calculate robust standard errors (sandwich)
+      robust_se <- sandwich::vcovHC(fit, type = "HC0")
+      # Compute robust confidence intervals
+      fit_results <- lmtest::coeftest(fit, vcov. = robust_se)
+    } else {
+      fit_results <- fit
+    }
+
+    # Summarize model coefficients
+    fit_summary <-
+      fit_results %>%
+      # broom does not support exponentiation after coeftest so do it manually
+      broom::tidy(conf.int = T) %>%
+      mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+      arrange(term == "(Intercept)", p.value) %>%
+      rename(odds_ratio = estimate, z_value = statistic)
+
+    # Stylize and print
+    stylized <-
+      fit_summary %>%
+      rename(
+        "Predictors" = term,
+        "Odds Ratios (OR)" = odds_ratio,
+        "SE" = std.error,
+        "Z-scores" = z_value,
+        "P-values" = p.value,
+        "CI (low)" = conf.low,
+        "CI (high)" = conf.high,
+      ) %>%
+      mutate(
+        `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+        `SE` = round(`SE`, 2),
+        `CI (low)` = round(`CI (low)`, 2),
+        `CI (high)` = round(`CI (high)`, 2),
+        `P-values` = round(`P-values`, 3),
+      )
+
+    out[[i]] <- stylized
+  }
+  return(out)
+}
+```
+
+
+## Unadjusted - Original variables
+
+- Fit logistic with no adjustments
+- Use original feature definitions
+
+```{r}
+# Define cols
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Fit model
+out <- fit_model(df = df_uni, cols = cols, is_sandwich = T)
+
+# Create table
+univariable_unadjusted <-
+  out %>%
+  bind_rows() %>%
+  filter(Predictors != "(Intercept)") %>%
+  filter(`CI (high)` < 50) %>%
+  arrange(`P-values`)
+
+# Print
+univariable_unadjusted %>%
+  sable()
+```
+
+
+## Adjusted - Original variables
+
+- Fit logistic
+- Adjust for age at first treatment and sex
+- Use original feature definitions
+
+```{r}
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Initialize
+out <- list()
+df <- df_uni
+
+for (i in seq_along(cols)) {
+  # Create formula
+  model <- as.formula(paste(
+    CHOSEN_OUTCOME,
+    "~",
+    "age_at_first_treatment_yrs + is_male +",
+    cols[i]
+  ))
+
+  fit <- suppressWarnings(glm(
+    model,
+    data = df,
+    family = binomial()
+  ))
+
+  # Calculate robust standard errors (sandwich)
+  robust_se <- sandwich::vcovHC(fit, type = "HC0")
+  # Compute robust confidence intervals
+  robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+
+  # Summarize model coefficients
+  fit_summary <-
+    robust_ci %>%
+    # broom does not support exponentiation after coeftest so do it manually
+    broom::tidy(conf.int = T) %>%
+    mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+    arrange(term == "(Intercept)", p.value) %>%
+    rename(odds_ratio = estimate, z_value = statistic)
+
+  # Stylize and print
+  stylized <-
+    fit_summary %>%
+    rename(
+      "Predictors" = term,
+      "Odds Ratios (OR)" = odds_ratio,
+      "SE" = std.error,
+      "Z-scores" = z_value,
+      "P-values" = p.value,
+      "CI (low)" = conf.low,
+      "CI (high)" = conf.high,
+    ) %>%
+    mutate(
+      `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+      `SE` = round(`SE`, 2),
+      `CI (low)` = round(`CI (low)`, 2),
+      `CI (high)` = round(`CI (high)`, 2),
+      `P-values` = round(`P-values`, 3),
+    )
+
+  out[[i]] <- stylized
+}
+```
+
+
+Print results.
+
+```{r}
+# Create table
+univariable_adjusted <-
+  out %>%
+  bind_rows() %>%
+  filter(Predictors != "(Intercept)") %>%
+  filter(!str_starts(Predictors, "age_at_first_treatment_yrs|is_male")) %>%
+  filter(`CI (high)` < 50) %>%
+  arrange(`P-values`)
+
+# Print
+univariable_adjusted %>%
+  sable()
+```
+
+
+## Unadjusted - Recoded variables
+
+- Fit logistic with no adjustments
+- Use the recoded feature definitions (less levels for max statistical power)
+
+```{r}
+# Define columns
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Initialize
+out <- list()
+df <- df_multi
+
+for (i in seq_along(cols)) {
+  # Create formula
+  model <- as.formula(paste(CHOSEN_OUTCOME, "~", cols[i]))
+
+  fit <- suppressWarnings(glm(
+    model,
+    data = df,
+    family = binomial()
+  ))
+
+  # Calculate robust standard errors (sandwich)
+  robust_se <- sandwich::vcovHC(fit, type = "HC0")
+  # Compute robust confidence intervals
+  robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+
+  # Summarize model coefficients
+  fit_summary <-
+    robust_ci %>%
+    # broom does not support exponentiation after coeftest so do it manually
+    broom::tidy(conf.int = T) %>%
+    mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+    arrange(term == "(Intercept)", p.value) %>%
+    rename(odds_ratio = estimate, z_value = statistic)
+
+  # Stylize and print
+  stylized <-
+    fit_summary %>%
+    rename(
+      "Predictors" = term,
+      "Odds Ratios (OR)" = odds_ratio,
+      "SE" = std.error,
+      "Z-scores" = z_value,
+      "P-values" = p.value,
+      "CI (low)" = conf.low,
+      "CI (high)" = conf.high,
+    ) %>%
+    mutate(
+      `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+      `SE` = round(`SE`, 2),
+      `CI (low)` = round(`CI (low)`, 2),
+      `CI (high)` = round(`CI (high)`, 2),
+      `P-values` = round(`P-values`, 3),
+    )
+
+  out[[i]] <- stylized
+}
+```
+
+
+Print results.
+
+```{r}
+# Create table
+univariable_unadjusted_recoded <-
+  out %>%
+  bind_rows() %>%
+  filter(Predictors != "(Intercept)") %>%
+  filter(`CI (high)` < 50) %>%
+  arrange(`P-values`)
+
+# Print
+univariable_unadjusted_recoded %>%
+  sable()
+```
+
+
+## Adjusted - Recoded
+
+- Fit logistic with no adjustments
+- Adjust for age at first treatment and sex
+- Use the recoded feature definitions (less levels for max statistical power)
+
+```{r}
+# Define columns
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Initialize
+out <- list()
+df <- df_multi
+
+for (i in seq_along(cols)) {
+  # Create formula
+  model <- as.formula(paste(
+    CHOSEN_OUTCOME,
+    "~",
+    "age_at_first_treatment_yrs + is_male +",
+    cols[i]
+  ))
+
+  fit <- suppressWarnings(glm(
+    model,
+    data = df,
+    family = binomial()
+  ))
+
+  # Calculate robust standard errors (sandwich)
+  robust_se <- sandwich::vcovHC(fit, type = "HC0")
+  # Compute robust confidence intervals
+  robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+
+  # Summarize model coefficients
+  fit_summary <-
+    robust_ci %>%
+    # broom does not support exponentiation after coeftest so do it manually
+    broom::tidy(conf.int = T) %>%
+    mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+    arrange(term == "(Intercept)", p.value) %>%
+    rename(odds_ratio = estimate, z_value = statistic)
+
+  # Stylize and print
+  stylized <-
+    fit_summary %>%
+    rename(
+      "Predictors" = term,
+      "Odds Ratios (OR)" = odds_ratio,
+      "SE" = std.error,
+      "Z-scores" = z_value,
+      "P-values" = p.value,
+      "CI (low)" = conf.low,
+      "CI (high)" = conf.high,
+    ) %>%
+    mutate(
+      `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+      `SE` = round(`SE`, 2),
+      `CI (low)` = round(`CI (low)`, 2),
+      `CI (high)` = round(`CI (high)`, 2),
+      `P-values` = round(`P-values`, 3),
+    )
+
+  out[[i]] <- stylized
+}
+```
+
+
+Print results.
+
+```{r}
+# Create table
+univariable_adjusted_recoded <-
+  out %>%
+  bind_rows() %>%
+  filter(Predictors != "(Intercept)") %>%
+  filter(!str_starts(Predictors, "age_at_first_treatment_yrs|is_male")) %>%
+  filter(`CI (high)` < 50) %>%
+  arrange(`P-values`)
+
+# Print
+univariable_adjusted_recoded %>%
+  sable()
+```
+
+
+------------------------------------------------------------------------
+
+# Interaction analysis
+
+## By hemorrhage
+
+Fit logistic.
+
+```{r}
+# Define columns
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Remove unwanted columns
+unwanted <- c("modified_rankin_score_final")
+cols <- cols[!cols %in% unwanted]
+
+adjustors <- c(
+  "age_at_first_treatment_yrs",
+  "is_male"
+)
+
+# Initialize
+out <- list()
+df <- df_multi
+k <- 1
+
+for (i in seq_along(cols)) {
+  # Do not fit model for variables that we are adjusting for
+  if (cols[i] %in% adjustors) {
+    next
+  }
+
+  # Create formula
+  model <- as.formula(paste(
+    CHOSEN_OUTCOME,
+    "~",
+    "age_at_first_treatment_yrs + is_male +",
+    cols[i],
+    "* has_hemorrhage",
+    sep = ""
+  ))
+
+  fit <- suppressWarnings(glm(
+    model,
+    data = df,
+    family = binomial()
+  ))
+
+  # Calculate robust standard errors (sandwich)
+  robust_se <- sandwich::vcovHC(fit, type = "HC0")
+  # Compute robust confidence intervals
+  robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+
+  # Summarize model coefficients
+  fit_summary <-
+    robust_ci %>%
+    # broom does not support exponentiation after coeftest so do it manually
+    broom::tidy(conf.int = T) %>%
+    mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+    arrange(term == "(Intercept)", p.value) %>%
+    rename(odds_ratio = estimate, z_value = statistic)
+
+  # Stylize and print
+  stylized <-
+    fit_summary %>%
+    rename(
+      "Predictors" = term,
+      "Odds Ratios (OR)" = odds_ratio,
+      "SE" = std.error,
+      "Z-scores" = z_value,
+      "P-values" = p.value,
+      "CI (low)" = conf.low,
+      "CI (high)" = conf.high,
+    ) %>%
+    mutate(
+      `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+      `SE` = round(`SE`, 2),
+      `CI (low)` = round(`CI (low)`, 2),
+      `CI (high)` = round(`CI (high)`, 2),
+      `P-values` = round(`P-values`, 3),
+    )
+
+  out[[k]] <- stylized
+  k <- k + 1
+}
+```
+
+
+Print all results results.
+
+```{r}
+# Define values
+unwanted <- c(
+  "is_maleTRUE",
+  "age_at_first_treatment_yrs",
+  "(Intercept)",
+  "has_hemorrhageTRUE"
+)
+
+# Initialize objects
+isolated_values <- list()
+
+# Get main and interaction effects
+for (i in seq_along(out)) {
+  # Get data
+  result <- out[[i]]
+
+  # Get all main effects of interest
+  main_effects <-
+    result %>%
+    filter(!Predictors %in% unwanted) %>%
+    filter(!str_detect(Predictors, ":")) %>%
+    select(-"SE", -"Z-scores")
+
+  # Get the interaction effects
+  interaction_effects <-
+    result %>%
+    filter(!Predictors %in% unwanted) %>%
+    filter(str_detect(Predictors, ":")) %>%
+    mutate(Predictors = str_extract(Predictors, "^[^:]+")) %>%
+    select(-"SE", -"Z-scores") %>%
+    rename_with(~ paste("Interaction -", .), -Predictors)
+
+  isolated_values[[i]] <-
+    main_effects %>%
+    left_join(interaction_effects, by = "Predictors")
+}
+```
+
+
+Create and print table.
+
+```{r}
+# Create table
+univariable_adjusted_recoded_interactions <-
+  isolated_values %>%
+  bind_rows() %>%
+  arrange(`Interaction - P-values`)
+
+# Print
+univariable_adjusted_recoded_interactions %>%
+  sable()
+```
+
+Eloquence.
+
+```{r}
+df %>%
+  count(has_hemorrhage, is_eloquent_location, !!sym(CHOSEN_OUTCOME)) %>%
+  drop_na() %>%
+  arrange(has_hemorrhage, is_eloquent_location) %>%
+  group_by(has_hemorrhage, is_eloquent_location) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+Deficit.
+
+```{r}
+df %>%
+  count(has_hemorrhage, has_deficit, !!sym(CHOSEN_OUTCOME)) %>%
+  drop_na() %>%
+  arrange(has_hemorrhage, has_deficit) %>%
+  group_by(has_hemorrhage, has_deficit) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+Seizures.
+
+```{r}
+df %>%
+  count(has_hemorrhage, has_seizures, !!sym(CHOSEN_OUTCOME)) %>%
+  drop_na() %>%
+  arrange(has_hemorrhage, has_seizures) %>%
+  group_by(has_hemorrhage, has_seizures) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+
+## By SM grade high vs. low
+
+Fit logistic.
+
+```{r}
+# Define columns
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL
+))
+
+# Remove unwanted columns
+unwanted <- c("modified_rankin_score_final")
+cols <- cols[!cols %in% unwanted]
+
+adjustors <- c(
+  "age_at_first_treatment_yrs",
+  "is_male"
+)
+
+# Initialize
+out <- list()
+df <- df_multi
+k <- 1
+
+for (i in seq_along(cols)) {
+  # Do not fit model for variables that we are adjusting for
+  if (cols[i] %in% adjustors) {
+    next
+  }
+
+  # Create formula
+  model <- as.formula(paste(
+    CHOSEN_OUTCOME,
+    "~",
+    "age_at_first_treatment_yrs + is_male +",
+    cols[i],
+    "* is_spetzler_martin_grade_less_than_4",
+    sep = ""
+  ))
+
+  fit <- suppressWarnings(glm(
+    model,
+    data = df,
+    family = binomial()
+  ))
+
+  # Calculate robust standard errors (sandwich)
+  robust_se <- sandwich::vcovHC(fit, type = "HC0")
+  # Compute robust confidence intervals
+  robust_ci <- lmtest::coeftest(fit, vcov. = robust_se)
+
+  # Summarize model coefficients
+  fit_summary <-
+    robust_ci %>%
+    # broom does not support exponentiation after coeftest so do it manually
+    broom::tidy(conf.int = T) %>%
+    mutate(across(c(estimate, "conf.low", "conf.high"), exp)) %>%
+    arrange(term == "(Intercept)", p.value) %>%
+    rename(odds_ratio = estimate, z_value = statistic)
+
+  # Stylize and print
+  stylized <-
+    fit_summary %>%
+    rename(
+      "Predictors" = term,
+      "Odds Ratios (OR)" = odds_ratio,
+      "SE" = std.error,
+      "Z-scores" = z_value,
+      "P-values" = p.value,
+      "CI (low)" = conf.low,
+      "CI (high)" = conf.high,
+    ) %>%
+    mutate(
+      `Odds Ratios (OR)` = round(`Odds Ratios (OR)`, 2),
+      `SE` = round(`SE`, 2),
+      `CI (low)` = round(`CI (low)`, 2),
+      `CI (high)` = round(`CI (high)`, 2),
+      `P-values` = round(`P-values`, 3),
+    )
+
+  out[[k]] <- stylized
+  k <- k + 1
+}
+```
+
+
+Print all results results.
+
+```{r}
+# Define values
+unwanted <- c(
+  "is_maleTRUE",
+  "age_at_first_treatment_yrs",
+  "(Intercept)",
+  "is_spetzler_martin_grade_less_than_4TRUE"
+)
+
+# Initialize objects
+isolated_values <- list()
+
+# Get main and interaction effects
+for (i in seq_along(out)) {
+  # Get data
+  result <- out[[i]]
+
+  # Get all main effects of interest
+  main_effects <-
+    result %>%
+    filter(!Predictors %in% unwanted) %>%
+    filter(!str_detect(Predictors, ":")) %>%
+    select(-"SE", -"Z-scores")
+
+  # Get the interaction effects
+  interaction_effects <-
+    result %>%
+    filter(!Predictors %in% unwanted) %>%
+    filter(str_detect(Predictors, ":")) %>%
+    mutate(Predictors = str_extract(Predictors, "^[^:]+")) %>%
+    select(-"SE", -"Z-scores") %>%
+    rename_with(~ paste("Interaction -", .), -Predictors)
+
+  isolated_values[[i]] <-
+    main_effects %>%
+    left_join(interaction_effects, by = "Predictors")
+}
+```
+
+
+Create and print table.
+
+```{r}
+# Create table
+univariable_adjusted_recoded_interactions <-
+  isolated_values %>%
+  bind_rows() %>%
+  arrange(`Interaction - P-values`)
+
+# Print
+univariable_adjusted_recoded_interactions %>%
+  sable()
+```
+
+Eloquence.
+
+```{r}
+df %>%
+  count(
+    is_spetzler_martin_grade_less_than_4,
+    is_eloquent_location,
+    !!sym(CHOSEN_OUTCOME)
+  ) %>%
+  drop_na() %>%
+  arrange(is_spetzler_martin_grade_less_than_4, is_eloquent_location) %>%
+  group_by(is_spetzler_martin_grade_less_than_4, is_eloquent_location) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+Deficit.
+
+```{r}
+df %>%
+  count(
+    is_spetzler_martin_grade_less_than_4,
+    has_deficit,
+    !!sym(CHOSEN_OUTCOME)
+  ) %>%
+  drop_na() %>%
+  arrange(is_spetzler_martin_grade_less_than_4, has_deficit) %>%
+  group_by(is_spetzler_martin_grade_less_than_4, has_deficit) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+Seizures.
+
+```{r}
+df %>%
+  count(
+    is_spetzler_martin_grade_less_than_4,
+    has_seizures,
+    !!sym(CHOSEN_OUTCOME)
+  ) %>%
+  drop_na() %>%
+  arrange(is_spetzler_martin_grade_less_than_4, has_seizures) %>%
+  group_by(is_spetzler_martin_grade_less_than_4, has_seizures) %>%
+  mutate(
+    num_total = sum(n),
+    pct_total = scales::percent(n / num_total, 1)
+  ) %>%
+  sable()
+```
+
+
+------------------------------------------------------------------------
+
+# Multivariable statistics
+
+## Resources
+
+Read the following guides:
+
+- [How to use glmnet](https://glmnet.stanford.edu/articles/glmnet.html)
+
+- [Selective inference using forward selection](https://stephens999.github.io/misc/selective_inference_toy.html)
+
+- [LASSO when conditioning on less: ROSI](https://selective-inference.github.io/Python-software/algorithms/ROSI.html)
+
+
+## Data prep
+
+Define unwanted columns.
+
+```{r}
+# Spetzler-Martin (SM) grade = size + eloquence + deep venous drainage.
+# Two encodings of the grade itself: the granular 1-5 and the dichotomized SM<4.
+SM_GRADES <- c(
+  "spetzler_martin_grade",
+  "is_spetzler_martin_grade_less_than_4"
+)
+
+# The individual SM components (some dimensions are encoded twice)
+SM_COMPONENTS <- c(
+  # Size
+  "size_score",
+  "max_size_cm",
+  # Eloquence
+  "is_eloquent_location",
+  "location",
+  # Venous drainage (has_deep_venous_drainage is identical to venous_drainage)
+  "venous_drainage",
+  "has_deep_venous_drainage"
+)
+
+# Lawton-Young = the Supplemented SM grade: SM plus age, hemorrhagic
+# presentation and diffuse nidus, pre-computed as one score. It ALREADY contains
+# SM, so it is the most comprehensive grade.
+LY_GRADE <- "lawton_young_grade"
+
+# What Lawton-Young adds on top of SM
+LY_EXTRAS <- c(
+  "has_hemorrhage",
+  "is_diffuse_nidus"
+  # LY includes age, but it lumps all <20yo into one bucket - all our patients are <18yo
+  # "age_at_first_treatment_yrs"
+)
+
+# When a component is encoded twice, keep the preferred version and drop the
+# duplicate, to avoid collinearity between two encodings of the same thing.
+REDUNDANT_COMPONENTS <- c(
+  # Size: keep the granular max_size_cm instead
+  "size_score",
+  # Eloquence: keep is_eloquent_location instead (more relevant)
+  "location",
+  # Venous drainage: keep has_deep_venous_drainage instead (more explainable name)
+  "venous_drainage"
+)
+
+# Columns excluded from every model
+unwanted_all <- c(
+  # These mRS are recorded AFTER tx, so using them would leak the outcome
+  "modified_rankin_score_postop_within_1_week",
+  "modified_rankin_score_final",
+  # Keep the pre-tx mRS (the baseline closest to treatment); this earlier is redundant
+  "modified_rankin_score_presentation",
+  # Treatment-era flags: proxies for calendar time, not the clinical question
+  "is_first_tx_after_2009",
+  "is_first_tx_from_2001"
+)
+
+# If the outcome itself is grade-related, drop the grades so they cannot leak it
+if (str_detect(params$TITLE, "grade")) {
+  unwanted_all <- c(unwanted_all, SM_GRADES, LY_GRADE)
+}
+
+# If the outcome is hemorrhage-related, drop hemorrhage-at-presentation
+if (str_detect(params$TITLE, "Hemorrhage")) {
+  unwanted_all <- c(unwanted_all, "has_hemorrhage")
+}
+
+# all: nothing extra removed, so it keeps both SM forms, Lawton-Young and every
+# component. Only the collinearity-immune LASSO methods use this set.
+
+# Components model: keep the granular components, drop every composite grade
+unwanted_without_gradings <- unique(c(
+  unwanted_all,
+  SM_GRADES,
+  LY_GRADE,
+  REDUNDANT_COMPONENTS
+))
+
+# Grades model: keep the Supplemented SM grade (Lawton-Young) alone. Drop both
+# SM forms (redundant with LY) and every component.
+unwanted_with_gradings <- unique(c(
+  unwanted_all,
+  SM_COMPONENTS,
+  SM_GRADES,
+  LY_EXTRAS
+))
+```
+
+
+Create dataset.
+
+```{r}
+# Define cols
+cols <- unname(c(
+  EXPOSURES_CONTINUOUS,
+  EXPOSURES_BINARY,
+  EXPOSURES_CATEGORICAL,
+  CHOSEN_OUTCOME
+))
+
+# Define column sets for each analysis
+cols_all <- cols[!cols %in% unwanted_all]
+cols_with_gradings <- cols[!cols %in% unwanted_with_gradings]
+cols_without_gradings <- cols[!cols %in% unwanted_without_gradings]
+
+# Create df of interest
+df_all <-
+  # Use the non-recoded dataset
+  df_multi %>%
+  dplyr::select(all_of(cols_all)) %>%
+  drop_na()
+
+df_with_gradings <-
+  # Use the non-recoded dataset
+  df_multi %>%
+  dplyr::select(all_of(cols_with_gradings)) %>%
+  drop_na()
+
+df_no_scores <-
+  # Use the non-recoded dataset
+  df_multi %>%
+  dplyr::select(all_of(cols_without_gradings)) %>%
+  drop_na()
+
+# Create formula
+frla <- as.formula(paste(CHOSEN_OUTCOME, " ~ . - 1"))
+
+# Create matrices with all variables
+# (remove falsely created FALSE columns)
+X_ <- model.matrix(frla, df_all)
+X_all <- X_[, !grepl("FALSE$", colnames(X_))]
+y_all <- df_all %>%
+  pull(CHOSEN_OUTCOME) %>%
+  as.numeric()
+
+# Create matrices with scores
+X_ <- model.matrix(frla, df_with_gradings)
+X_with_gradings <- X_[, !grepl("FALSE$", colnames(X_))]
+y_with_gradings <- df_with_gradings %>%
+  pull(CHOSEN_OUTCOME) %>%
+  as.numeric()
+
+# Create matrices with score components
+X_ <- model.matrix(frla, df_no_scores)
+X_without_gradings <- X_[, !grepl("FALSE$", colnames(X_))]
+y_without_gradings <- df_no_scores %>%
+  pull(CHOSEN_OUTCOME) %>%
+  as.numeric()
+
+
+# Remove duplicate columns
+# Define priority pairs (keep first, remove second)
+priority_pairs <- list(
+  c("is_maleTRUE", "procedure_combinationsS")
+  # Add more pairs as needed
+)
+
+# Remove lower priority columns when both exist
+for (pair in priority_pairs) {
+  if(all(pair %in% colnames(X_all))) {
+    cols_ <- colnames(X_all)
+    X_all <- X_all[, !cols_ %in% pair[2]]
+  }
+  if(all(pair %in% colnames(X_with_gradings))) {
+    cols_ <- colnames(X_with_gradings)
+    X_with_gradings <- X_with_gradings[, !cols_ %in% pair[2]]
+  }
+  if(all(pair %in% colnames(X_without_gradings))) {
+    cols_ <- colnames(X_without_gradings)
+    X_without_gradings <- X_without_gradings[, !cols_ %in% pair[2]]
+  }
+}
+
+
+# X should be centered for LASSO (necessary for glmnet)
+# (scale = FALSE as this is done by the standardization step in glmnet)
+center_values <- function(X) {
+  # Identify binary columns (those with only 0s and 1s)
+  binary_cols <- apply(X, 2, function(x) all(x %in% c(0, 1)))
+  # Center but do not scale - avoid centering one-hot encoded vectors
+  X[, !binary_cols] <- scale(X[, !binary_cols], center = T, scale = F)
+  # Return
+  return(X)
+}
+
+X_all_centered <- center_values(X_all)
+X_with_gradings_centered <- center_values(X_with_gradings)
+X_without_gradings_centered <- center_values(X_without_gradings)
+
+# See the names of X to match column numbers to column names later on
+colnames(X_without_gradings_centered)
+```
+
+
+## Configs
+
+```{r}
+# Drop the surgery dummy when present (collinear with the outcome)
+drop_surgery <- function(x) x[, !colnames(x) %in% "is_surgeryTRUE", drop = FALSE]
+
+# Which methods to run (all TRUE by default)
+METHODS <- list(
+  # Selective-inference LASSO at the optimal lambda and the lambda at min loss
+  selective_lasso = TRUE,
+  # Bootstrap of the selective-inference LASSO
+  bootstrap = TRUE,
+  # Multi-sample splitting with cross-fitting
+  split = TRUE,
+  # Firth penalized logistic on the selected set
+  firth = TRUE,
+  # Forward step-wise (logistic ORs + native linear inference)
+  stepwise = TRUE,
+  # Univariable logistic, one predictor at a time
+  univariable = TRUE,
+  # p-value-screened multivariable logistic
+  multivariable = TRUE
+)
+
+CONDITIONS <- list(
+  # All predictors (collinear → no multivariable)
+  all = list(
+    x = X_all_centered,
+    y = y_all,
+    multi_unwanted = NULL
+  ),
+  # Score components without the composite scores
+  without_gradings = list(
+    x = X_without_gradings_centered,
+    y = y_without_gradings,
+    multi_unwanted = unwanted_without_gradings
+  ),
+  # Composite scores without their components
+  with_gradings = list(
+    x = X_with_gradings_centered,
+    y = y_with_gradings,
+    multi_unwanted = unwanted_with_gradings
+  ),
+  # As without_gradings, drop is_surgery (no multivariable)
+  without_gradings_no_surgery = list(
+    x = drop_surgery(X_without_gradings_centered),
+    y = y_without_gradings,
+    multi_unwanted = NULL
+  ),
+  # As with_gradings, drop is_surgery (no multivariable)
+  with_gradings_no_surgery = list(
+    x = drop_surgery(X_with_gradings_centered),
+    y = y_with_gradings,
+    multi_unwanted = NULL
+  )
+)
+
+# Traditional multivariable regression additional parameters
+MULTI_PARAMS <- list(
+  # Data frame for the multivariable fit (non-recoded)
+  df = df_multi,
+  # Outcome column name
+  outcome = CHOSEN_OUTCOME,
+  # Univariable tables the predictor screen binds and filters
+  screen_tables = list(
+    univariable_adjusted_recoded,
+    univariable_unadjusted_recoded
+  ),
+  # Univariable p-value threshold to enter the screen
+  pval_threshold = 0.2,
+  # Columns the multivariable fit requires complete
+  drop_na_cols = c("modified_rankin_score_pretreatment", "location")
+)
+
+# Univariable table to report (unadjusted, recoded)
+UNI_TABLE <- univariable_unadjusted_recoded
+
+# Which methods to render forest plots for (all TRUE by default)
+PLOT_METHODS <- list(
+  # Selective LASSO at the optimal (stable-plateau) lambda
+  lasso_opt = TRUE,
+  # Selective LASSO at lambda.min
+  lasso_min = TRUE,
+  # Multi-sample splitting with cross-fitting
+  split = TRUE
+)
+```
+
+
+## Parallelize
+
+```{r}
+# furrr/future power the bootstrap and split loops. Leaves one core free for the OS
+if (PARALLELIZE) {
+  future::plan(future::multisession, workers = future::availableCores() - 1)
+}
+```
+
+
+## Methods
+
+```{r}
+source("multivariable-methods.R")
+```
+
+
+## Run
+
+```{r}
+# Compute all multivariable regression methods at once
+results <- compute_all_methods(
+  # Each condition's centered LASSO design + its multivariable exclusion set
+  conditions = CONDITIONS,
+  # Pre-computed univariable table (attached to the "all" rows)
+  uni_table = UNI_TABLE,
+  # Bundled multivariable settings (computed per condition inside)
+  multi_params = MULTI_PARAMS,
+  # Method on/off toggles (missing entries default to TRUE)
+  methods = METHODS,
+  # Selective-inference significance level (95% CI at 0.05, plus 90% companion)
+  si_alpha = 0.05,
+  # Master RNG seed; reset at the start of every stochastic method and condition
+  seed = 141845,
+  # Cross-validation folds for the LASSO
+  nfolds = 10,
+  # Random half-splits for the split-and-cross-fit method
+  n_splits = 1000,
+  # Bootstrap replicates
+  boot_B = 1000,
+  # Bootstrap CI significance level
+  boot_alpha = 0.05,
+  # Bootstrap lambda rule (0 = lambda.min, 1 = lambda.1se)
+  boot_k = 0,
+  # Minimum selection frequency (%) for a variable to appear in the split plots
+  split_min_pct = 5
+)
+
+# Results table
+df_combined <- results$combined
+```
+
+
+Release the parallel worker sessions.
+
+```{r}
+if (PARALLELIZE) {
+  future::plan(future::sequential)
+}
+```
+
+
+Inspect results.
+
+```{r}
+df_combined %>% sable()
+```
+
+
+## Plot
+
+```{r}
+# Build a forest plot for each enabled selective-LASSO/split model
+plots <- plot_all_methods(
+  # The computed results (uses its plot_tables element)
+  results = results,
+  # Named lookup that maps raw term names to readable labels
+  col_names = c(EXPOSURES_CONTINUOUS, EXPOSURES_BINARY, EXPOSURES_CATEGORICAL),
+  # Which methods to plot (missing entries default to TRUE)
+  methods = PLOT_METHODS
+)
+```
+
+
+------------------------------------------------------------------------
+
+# Write
+
+## Setup
+
+Create the necessary directories.
+
+```{r, results="hold"}
+# Get today's date
+today <- Sys.Date()
+today <- format(today, "%Y-%m-%d")
+
+# Create folder names
+base_folder <- file.path(DST_DIRNAME, ANALYSIS_NAME)
+date_folder <- file.path(base_folder, today)
+csv_folder <- file.path(date_folder, "csv")
+pdf_folder <- file.path(date_folder, "pdf")
+html_folder <- file.path(date_folder, "html")
+models_folder <- file.path(date_folder, "rds")
+
+# Create folders
+suppressWarnings(dir.create(base_folder))
+suppressWarnings(dir.create(date_folder))
+suppressWarnings(dir.create(csv_folder))
+suppressWarnings(dir.create(pdf_folder))
+suppressWarnings(dir.create(html_folder))
+suppressWarnings(dir.create(models_folder))
+
+# Print folder names
+print(base_folder)
+print(date_folder)
+print(csv_folder)
+print(pdf_folder)
+print(html_folder)
+```
+
+
+## Models
+
+### Bootstrap
+
+```{r}
+# Save the bootstrap draws so the resampling is reproducible later
+if (!is.null(results$raw_all)) {
+  saveRDS(results$raw_all, file.path(models_folder, "bootstrap_raw_all.rds"))
+}
+```
+
+
+## Figures
+
+### Visualizations
+
+```{r}
+# Save
+ggsave(
+  file.path(pdf_folder, "sm_grade_vs_complications_bar_chart.pdf"),
+  plot = plots$sm_grade_vs_complications_bar_chart,
+  width = 8,
+  height = 6
+)
+```
+
+
+### Multivariable statistics
+
+```{r}
+# Export every forest to forest_<label>_<condition>.pdf
+write_all_plots(plots, plot_folder = pdf_folder)
+```
+
+
+## Tables
+
+### Univariable statistics
+
+```{r}
+write_csv(
+  univariable_unadjusted,
+  file.path(csv_folder, "univariable_unadjusted.csv")
+)
+
+write_csv(
+  univariable_adjusted,
+  file.path(csv_folder, "univariable_adjusted.csv")
+)
+
+write_csv(
+  univariable_adjusted_recoded,
+  file.path(csv_folder, "univariable_adjusted_recoded.csv")
+)
+
+write_csv(
+  univariable_adjusted_recoded_interactions,
+  file.path(csv_folder, "univariable_adjusted_recoded_interactions.csv")
+)
+```
+
+
+### Multivariable statistics
+
+```{r}
+# Write every computed table to its CSV (export only; no computation here)
+write_all_methods(results, csv_folder)
+```
+
+
+------------------------------------------------------------------------
+
+
+# Reproducibility
+
+## Linting and styling
+
+```{r, eval=FALSE}
+# Style current file
+styler::style_file(
+  path = rstudioapi::getSourceEditorContext()$path,
+  style = styler::tidyverse_style
+)
+
+# Lint current file
+lintr::lint(rstudioapi::getSourceEditorContext()$path)
+```
+
+
+## Dependency management
+
+```{r, eval=FALSE, results="hide"}
+# Clean up project of libraries not in use
+# (use prompt = FALSE to avoid the interactive session)
+# (packages can only be removed in interactive mode b/c this is destructive)
+renv::clean(prompt = TRUE)
+
+# Update lock file with new packages
+renv::snapshot()
+```
+
+
+## Containerization
+
+```{r}
+# Only run this if option is set to TRUE
+if (UPDATE_DOCKERFILE) {
+  # Create a dockerfile from the session info
+  my_dockerfile <- containerit::dockerfile(from = sessionInfo(), env = ls())
+  # Write file
+  write(my_dockerfile, file = "~/Dockerfile")
+  # Print
+  print(my_dockerfile)
+}
+```
+
+
+------------------------------------------------------------------------
+
+# Documentation {.tabset}
+
+## Session Info
+
+```{r session_info, echo=FALSE}
+print(sessionInfo(), locale = FALSE)
+```
+
+## References
+
+```{r refs, echo=FALSE}
+(.packages()) %>%
+  sort() %>%
+  lapply(citation) %>%
+  lapply(c) %>%
+  unique()
+```

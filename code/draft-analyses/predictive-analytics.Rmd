@@ -106,7 +106,8 @@ opts_chunk$set(
   comment = NA,
   fig.align = "center",
   fig.width = 7,
-  fig.path = "../../outputs/predictive-analytics/figs/", # export all figures
+  fig.path = file.path(tempdir(), "../../outputs/predictive-analytics/figs/"),
+  # fig.path = "../../outputs/predictive-analytics/figs/", # export all figures
   linewidth = 91,
   width = 75
 )
@@ -313,6 +314,7 @@ EXPOSURES_CONTINUOUS <- c(
 EXPOSURES_BINARY <- c(
   "Sex (Male)" = "is_male",
   "First tx after Jun 2009" = "is_first_tx_after_2009",
+  "First tx as of 2001 onwards" = "is_first_tx_from_2001",
   "Involves eloquent location" = "is_eloquent_location",
   "Has deep venous drainage" = "has_deep_venous_drainage",
   "Diffuse nidus" = "is_diffuse_nidus",
@@ -408,17 +410,21 @@ compute_descriptive_continuous <- function(
     sprintf("%.1f", x)
   }
 
-  # Compute new dataset
-  df <-
-    df %>%
-    select(cols, outcome_col, interaction_col) %>%
-    drop_na(outcome_col, interaction_col)
-
   # Apply interaction
+  # (keep this selection here to avoid impact of prev. defined interaction_col)
   if (use_interaction) {
+    # Compute new dataset
     df <-
       df %>%
+      select(cols, outcome_col, interaction_col) %>%
+      drop_na(outcome_col, interaction_col) %>% 
       filter(!!sym(interaction_col) == interaction_col_value)
+  } else {
+    # Compute new dataset
+    df <-
+      df %>%
+      select(cols, outcome_col) %>%
+      drop_na(outcome_col)
   }
 
   # Compute descriptive statistics
@@ -451,7 +457,7 @@ compute_descriptive_continuous <- function(
       names_from = !!sym(outcome_col),
       values_from = stats
     ) %>%
-    relocate(outcome_labels[2], .after = outcome_labels[1])
+    relocate(outcome_labels[1], .after = outcome_labels[2])
 
   # Compute p-values
   pvals <-
@@ -468,19 +474,25 @@ compute_descriptive_continuous <- function(
     left_join(pvals)
 
   # Add sample size to column names
-  num_with_outcome <- sum(df %>% pull(outcome_col))
-  num_no_outcome <- sum(!df %>% pull(outcome_col))
-
+  # Count each outcome group by its OWN label (robust to level/label order)
+  n_by_label <- setNames(
+    c(
+      sum(df %>% pull(outcome_col) == outcome_levels[1], na.rm = TRUE),
+      sum(df %>% pull(outcome_col) == outcome_levels[2], na.rm = TRUE)
+    ),
+    outcome_labels
+  )
+  # Build headers so each label carries its own n (order matches relocate())
   new_col_names <- c(
-    glue::glue("{prefix} - {outcome_labels[2]} (n={num_with_outcome})"),
-    glue::glue("{prefix} - {outcome_labels[1]} (n={num_no_outcome})"),
+    glue::glue("{prefix} - {outcome_labels[2]} (n={n_by_label[[outcome_labels[2]]]})"),
+    glue::glue("{prefix} - {outcome_labels[1]} (n={n_by_label[[outcome_labels[1]]]})"),
     glue::glue("{prefix} - P-value")
   )
 
   out <-
     out %>%
     rename_with(
-      .cols = !!sym(outcome_labels[1]):pvalue, ~new_col_names
+      .cols = !!sym(outcome_labels[2]):pvalue, ~new_col_names
     ) %>%
     mutate(
       keys = ifelse(keys == interaction_col, interaction_col_name, keys)
@@ -578,13 +590,19 @@ compute_descriptive_binary <- function(
     desc_stats %>%
     left_join(pvals)
 
-  # Prettify
-  num_with_outcome <- sum(df %>% pull(outcome_col))
-  num_no_outcome <- sum(!df %>% pull(outcome_col))
-
+  # Add sample size to column names
+  # Count each outcome group by its OWN label (robust to level/label order)
+  n_by_label <- setNames(
+    c(
+      sum(df %>% pull(outcome_col) == outcome_levels[1], na.rm = TRUE),
+      sum(df %>% pull(outcome_col) == outcome_levels[2], na.rm = TRUE)
+    ),
+    outcome_labels
+  )
+  # Build headers so each label carries its own n (order matches relocate())
   new_col_names <- c(
-    glue::glue("{prefix} - {outcome_labels[2]} (n={num_with_outcome})"),
-    glue::glue("{prefix} - {outcome_labels[1]} (n={num_no_outcome})"),
+    glue::glue("{prefix} - {outcome_labels[2]} (n={n_by_label[[outcome_labels[2]]]})"),
+    glue::glue("{prefix} - {outcome_labels[1]} (n={n_by_label[[outcome_labels[1]]]})"),
     glue::glue("{prefix} - P-value")
   )
 
@@ -598,6 +616,461 @@ compute_descriptive_binary <- function(
     )
 
   return(out)
+}
+```
+
+### Selective inference utils
+
+#### Selective inference
+
+```{r}
+#' Selective-inference LASSO for a binary outcome
+#'
+#' @description
+#' Fit an L1-penalised logistic regression, choose a regularisation-stable
+#' model (or a user-specified one), and return post-selection (selective)
+#' p-values and confidence intervals via
+#' [selectiveInference::fixedLassoInf()].
+#'
+#' @details
+#' Design decisions baked in from empirical debugging on small, separation-prone
+#' clinical data:
+#'
+#' * **Centred, unscaled `x`.** Scaling the columns (equivalently
+#'   `glmnet(standardize = TRUE)`) reshaped the truncation geometry so that the
+#'   observed statistics sat on the boundary of `[vlo, vup]`, yielding
+#'   non-sensical / infinite intervals. Centred-only keeps them interior.
+#' * **`standardize = FALSE`**, so glmnet penalises exactly the design handed to
+#'   `fixedLassoInf` (uniform penalty on the same `x`).
+#' * **`lambda * n`.** `fixedLassoInf` uses the standard lasso objective, while
+#'   glmnet scales the loss by `1/n`; `beta` is read at glmnet's `lambda`, so the
+#'   matching penalty is `lambda * n` (otherwise the KKT check fails and the
+#'   truncation is invalid).
+#' * **No `sigma`** — it is ignored for `family = "binomial"`.
+#' * **Fixed folds** via an explicit `foldid`, so results do not drift with
+#'   session RNG state or package versions.
+#' * **Stable-plateau selection.** A fractional-standard-error sweep generalises
+#'   the 1-SE rule; when `k` is not supplied the function picks the *longest*
+#'   run of tolerances that select an identical variable set (ties broken toward
+#'   more regularisation). This is a pre-specified rule, so model choice is not
+#'   tuned to the result.
+#'
+#' The tolerance `k` scales the one-standard-error rule: lambda is the largest
+#' (most-regularised) value whose CV error is within `k * SE` of the minimum.
+#' Hence **`k = 0` reproduces `lambda.min`** (least regularised, most variables)
+#' and **`k = 1` reproduces `lambda.1se`** (most regularised, fewest), with `k`
+#' in between trading variables for stability.
+#'
+#' Selective confidence intervals are truncated intervals conditional on the
+#' selection event; they need NOT be symmetric about the odds ratio. The
+#' diagnostic section checks `tailarea` (target `ci_alpha / 2` per side) and
+#' reports pass/fail without ever stopping execution.
+#'
+#' @param x Numeric design matrix (`n` x `p`), PRE-CENTRED but NOT column-scaled.
+#' @param y Numeric 0/1 outcome vector of length `n`.
+#' @param family glmnet family. Validated for `"binomial"`; odds-ratio reporting
+#'   (`exp()`) assumes binomial.
+#' @param alpha glmnet elastic-net mixing (`1` = lasso, `0` = ridge).
+#' @param nfolds Number of cross-validation folds.
+#' @param k_grid Numeric grid of fractional-SE tolerances to sweep, in `[0, 1]`
+#'   (`0` = `lambda.min`, `1` = `lambda.1se`).
+#' @param k Optional single fractional-SE tolerance in `[0, 1]`. `k = 0` uses
+#'   `lambda.min` (least regularised, most variables); `k = 1` uses `lambda.1se`
+#'   (most regularised, fewest); values in between interpolate on the CV-error
+#'   scale. If supplied, it overrides the automatic plateau search. Default
+#'   `NULL` (automatic).
+#' @param ci_alpha `fixedLassoInf` significance level; `0.1` gives a 90% CI
+#'   (0.05 per tail). Use `0.05` for 95%.
+#' @param intercept Fit an intercept (must be `TRUE` for binomial).
+#' @param standardize glmnet column standardisation. Keep `FALSE`; exposed only
+#'   for testing (see Details).
+#' @param seed Seed for reproducible folds.
+#' @param min_vars Minimum model size; whatever route chooses lambda, a final
+#'   protection step guarantees at least this many variables (never zero).
+#' @param tailarea_tol Absolute tolerance for the `tailarea_ok` validity flag.
+#'
+#' @return A list (in creation order):
+#' \describe{
+#'   \item{`sweep`}{the full k-sweep, for auditing.}
+#'   \item{`k_plateau`}{tolerance range of the chosen model (`c(k, k)` if `k` given).}
+#'   \item{`lambda`}{chosen glmnet-scale lambda.}
+#'   \item{`fit`}{the raw `fixedLassoInf` object.}
+#'   \item{`table`}{tibble of `term`, `odds_ratio`, `pvalue`, `ci_lo`, `ci_hi`.}
+#'   \item{`n_vars`}{number of selected variables.}
+#'   \item{`variables`}{names of the selected variables.}
+#'   \item{`tailarea`}{achieved tail areas (want ~ `ci_alpha / 2`).}
+#'   \item{`tailarea_ok`}{`TRUE` if every `tailarea` is within `tailarea_tol`.}
+#' }
+#'
+#' @examples
+#' \dontrun{
+#' res <- fit_selective_lasso(X_with_gradings_centered, y_with_gradings)
+#' res$table |> sable()
+#' res$tailarea_ok
+#'
+#' # Force a specific tolerance (k = 0 gives the lambda.min model)
+#' res2 <- fit_selective_lasso(X_with_gradings_centered, y_with_gradings, k = 0.5)
+#' }
+#'
+#' @importFrom glmnet cv.glmnet glmnet
+#' @importFrom selectiveInference fixedLassoInf
+#' @importFrom purrr map_dfr
+#' @importFrom tibble tibble
+#' @importFrom dplyr filter arrange desc
+#' @export
+fit_selective_lasso <- function(
+    x,
+    y,
+    family = "binomial",
+    elastic_net_alpha = 1,
+    nfolds = 10,
+    k_grid = seq(0, 1, 0.05),
+    k = NULL,
+    alpha = 0.05,
+    intercept = TRUE,
+    standardize = FALSE,
+    seed = 141845,
+    min_vars = 1,
+    tailarea_tol = 0.01
+) {
+
+  # ---- 0. Setup + reproducible folds (decoupled from session RNG state) ----
+  # Allow for a null see when using this function in the bootstrap
+  if (!is.null(seed)) set.seed(seed)
+  n <- length(y)
+  foldid <- sample(rep(seq_len(nfolds), length.out = n))
+
+  # ---- 1. Cross-validation: lambda path + CV-error curve --------------------
+  cv_fit <-
+    cv.glmnet(
+      x = x,
+      y = y,
+      family = family,
+      alpha = elastic_net_alpha,
+      foldid = foldid,
+      standardize = standardize
+    )
+
+  # ---- 2. Full-path fit: single, clean source for all coefficient reads -----
+  #     (standalone so exact = TRUE has a well-formed call to refit)
+  gfit <-
+    glmnet(
+      x = x,
+      y = y,
+      family = family,
+      alpha = elastic_net_alpha,
+      intercept = intercept,
+      standardize = standardize
+    )
+
+  # ---- 3. Fractional-SE sweep ----------------------------------------------
+  #     For each tolerance k, lambda_k = largest lambda whose CV error is within
+  #     k standard errors of the minimum; record which variables it selects so
+  #     we can find a set-stable plateau. Note: k = 0 -> lambda.min,
+  #     k = 1 -> lambda.1se.
+  imin <- which.min(cv_fit$cvm)
+
+  sweep <-
+    purrr::map_dfr(
+      k_grid,
+      function(k) {
+
+        thr <- cv_fit$cvm[imin] + k * cv_fit$cvsd[imin]
+        lam <- max(cv_fit$lambda[cv_fit$cvm <= thr])
+        b <- as.matrix(coef(gfit, s = lam))
+        vars <- setdiff(rownames(b)[b[, 1] != 0], "(Intercept)")
+
+        tibble::tibble(
+          k = k,
+          lambda = lam,
+          n_vars = length(vars),
+          var_key = paste(sort(vars), collapse = "|")
+        )
+      }
+    )
+
+  # ---- 4. Most stable non-empty plateau (used only when k is not supplied) --
+  #     Plateau = consecutive k with an identical selected set. Prefer the
+  #     longest (most tolerance-robust); tie-break toward more regularisation.
+  runs <- rle(sweep$var_key)
+  ends <- cumsum(runs$lengths)
+  starts <- ends - runs$lengths + 1L
+
+  plateaus <-
+    tibble::tibble(
+      var_key = runs$values,
+      len = runs$lengths,
+      start = starts,
+      end = ends,
+      n_vars = sweep$n_vars[starts]
+    ) %>%
+    dplyr::filter(n_vars >= min_vars) %>%
+    dplyr::arrange(dplyr::desc(len), dplyr::desc(start))
+
+  # ---- 5. Choose lambda -----------------------------------------------------
+  #     Priority: (a) user-supplied k; (b) centre of the most stable plateau;
+  #     (c) lambda.min. A final protection step then relaxes lambda if needed so
+  #     at least `min_vars` variables are selected (never a zero-variable model).
+  if (!is.null(k)) {
+    thr <- cv_fit$cvm[imin] + k * cv_fit$cvsd[imin]
+    lambda <- max(cv_fit$lambda[cv_fit$cvm <= thr])
+    k_plateau <- c(k, k)
+  } else if (nrow(plateaus) > 0) {
+    best <- plateaus[1, ]
+    mid_idx <- floor((best$start + best$end) / 2)
+    lambda <- sweep$lambda[mid_idx]
+    k_plateau <- c(sweep$k[best$start], sweep$k[best$end])
+  } else {
+    lambda <- cv_fit$lambda.min
+    k_plateau <- c(NA_real_, NA_real_)
+  }
+
+  idx <- which.min(abs(cv_fit$lambda - lambda))
+  while (cv_fit$nzero[idx] < min_vars && idx < length(cv_fit$lambda)) {
+    idx <- idx + 1L
+  }
+  lambda <- cv_fit$lambda[idx]
+
+  # ---- 6. Exact coefficients at the chosen lambda (keep intercept) ----------
+  beta <-
+    coef(
+      object = gfit,
+      x = x,
+      y = y,
+      s = lambda,
+      exact = TRUE
+    )
+
+  # ---- 7. Selective inference (lambda * n rescales glmnet's 1/n penalty) ----
+  out <-
+    fixedLassoInf(
+      x = x,
+      y = y,
+      beta = beta,
+      lambda = lambda * n,
+      alpha = alpha,
+      family = family,
+      intercept = intercept
+    )
+
+  # ---- 8. Results on the OR scale (centred x => no back-transform) ----------
+  if (length(out$vars) > 0) {
+    table <-
+      tibble::tibble(
+        term = names(out$vars),
+        odds_ratio = exp(out$coef0),
+        pvalue = pmin(1, 2 * out$pv),
+        # selectiveInference uses 1-sided pvals b/c LASSO has already decided
+        # the side - so they are conditioned on the side
+        pvalue_1sided = out$pv,
+        ci_lo = exp(out$ci[, 1]),
+        ci_hi = exp(out$ci[, 2])
+      ) %>%
+      dplyr::arrange(pvalue)
+    attr(table, "ci_level") <- 1 - alpha
+  } else {
+    table <- tibble::tibble()
+  }
+
+  n_vars <- length(out$vars)
+  variables <- names(out$vars)
+  tailarea <- out$tailarea
+
+  # ---- 9. Diagnostic: validity of the selective intervals -------------------
+  #     Each CI is found by a numerical search over a truncated Gaussian; the
+  #     achieved tail area per side should equal ci_alpha / 2. Drift means the
+  #     search struggled and the CI is untrustworthy. We only REPORT pass/fail
+  #     here (via a message) and never stop — the caller decides what to do.
+  if (n_vars > 0) {
+    tailarea_ok <- all(abs(tailarea - alpha / 2) <= tailarea_tol)
+  } else {
+    tailarea_ok <- NA
+  }
+
+  message(
+    "Selective-inference validity check: ",
+    if (isTRUE(tailarea_ok)) {
+      "PASSED"
+    } else if (isFALSE(tailarea_ok)) {
+      "FAILED (tailarea off target - treat CIs with caution)"
+    } else {
+      "N/A (no variables selected)"
+    }
+  )
+
+  # ---- 10. Return (elements in the order they were created) -----------------
+  list(
+    sweep = sweep,
+    k_plateau = k_plateau,
+    lambda = lambda,
+    fit = out,
+    table = table,
+    n_vars = n_vars,
+    variables = variables,
+    tailarea = tailarea,
+    tailarea_ok = tailarea_ok,
+    # Level of significance
+    alpha = alpha,
+    ci_alpha = 1 - alpha
+  )
+}
+```
+
+
+#### Firth regression
+
+```{r}
+# Firth penalised logistic on a given predictor set (separation-robust)
+firth_block <- function(x, y, vars) {
+  if (length(vars) == 0) return(tibble::tibble(term = character()))
+  df  <- data.frame(.y = y, x[, vars, drop = FALSE], check.names = FALSE)
+  fit <- tryCatch(logistf::logistf(.y ~ ., data = df), error = function(e) NULL)
+  if (is.null(fit)) return(tibble::tibble(term = vars))
+  idx <- which(names(coef(fit)) != "(Intercept)")
+  tibble::tibble(
+    term = names(coef(fit))[idx],
+    OR   = exp(coef(fit)[idx]),
+    SE   = sqrt(diag(vcov(fit)))[idx],
+    ci   = ci_str(exp(fit$ci.lower[idx]), exp(fit$ci.upper[idx])),  # profile-penalised CI
+    pval = fit$prob[idx]                                            # penalised LR p
+  )
+}
+```
+
+
+#### Forest plots
+
+```{r}
+#' Forest plot of selective-inference odds ratios with CI and p-value columns
+#'
+#' @description
+#' Renders the odds-ratio table from [fit_selective_lasso()] as a linear-scale
+#' forest plot (point + selective CI, reference line at OR = 1, point estimate
+#' above each dot) alongside right-hand text columns for the confidence interval
+#' and the p-value.
+#'
+#' @param table A tibble with `term`, `odds_ratio`, `pvalue`, `ci_lo`, `ci_hi`.
+#' @param col_names Named lookup vector passed to [prettify_terms()].
+#' @param ci_cap Upper cap on `ci_hi` for the drawn error bar (wide selective
+#'   intervals are clipped so the axis stays legible). The CI *text* column
+#'   always shows the true, uncapped value. Default 10.
+#' @param ci_title Header for the CI text column. Note the interval reflects the
+#'   `ci_alpha` used in [fit_selective_lasso()]: the default `ci_alpha = 0.1`
+#'   gives a 90% CI, so fit with `ci_alpha = 0.05` for a true "95% CI".
+#' @param pval_digits Significant digits for the displayed p-values.
+#' @param or_digits Decimal places for the point-estimate and CI labels.
+#' @param widths Relative widths of the (OR plot, spacer, CI, p-value) panels.
+#'
+#' @return A patchwork object (or `NULL`, invisibly, if `table` is empty).
+#'
+#' @importFrom dplyr filter arrange desc mutate
+#' @importFrom ggplot2 ggplot aes geom_point geom_errorbar geom_vline geom_text
+#'   labs guides scale_x_continuous scale_y_discrete expansion theme
+#'   element_text element_blank ggtitle theme_void margin
+#' @importFrom patchwork plot_spacer plot_layout
+#' @importFrom grid unit
+#' @export
+plot_selective_or <- function(
+    table,
+    col_names = c(EXPOSURES_CONTINUOUS, EXPOSURES_BINARY, EXPOSURES_CATEGORICAL),
+    ci_cap = 10,
+    ci_level = NULL,
+    pval_digits = 2,
+    or_digits = 2,
+    widths = c(1, -0.01, 0.25, 0.15)
+) {
+if (is.null(table) || nrow(table) == 0) {
+    message("plot_selective_or: empty table, nothing to plot.")
+    return(invisible(NULL))
+  }
+
+  # CI level -> header. Read the attribute set by fit_selective_lasso (before any
+  # dplyr op that would drop it); fall back to the argument, then to 0.95.
+  if (is.null(ci_level)) ci_level <- attr(table, "ci_level")
+  if (is.null(ci_level)) ci_level <- 0.95
+  ci_title <- paste0(round(100 * ci_level), "% CI")
+
+  coef_table <-
+    table %>%
+    dplyr::filter(term != "(Intercept)") %>%
+    dplyr::arrange(dplyr::desc(odds_ratio)) %>%
+    dplyr::mutate(
+      term = prettify_terms(term, col_names),
+      term = factor(term, levels = term)
+    ) %>%
+    dplyr::mutate(
+      ci_hi_raw = ci_hi,
+      ci_hi = ifelse(ci_hi > ci_cap, ci_cap, ci_hi)
+    )
+
+  x_hi <- max(coef_table$ci_hi, coef_table$odds_ratio, na.rm = TRUE)
+  x_breaks <- pretty(c(0, x_hi))
+  x_limits <- range(x_breaks)
+
+  # Tight expansion so gridlines hug the data; clip = "off" lets the OR labels
+  # sit above the top dot without being cut. Outer space comes from plot.margin.
+  y_expand <- ggplot2::expansion(add = c(0.15, 0.2))
+  pm <- grid::unit(c(1.4, 0, 1.4, 0), "lines")
+
+  odds_ratios_plot <-
+    coef_table %>%
+    ggplot2::ggplot(ggplot2::aes(x = odds_ratio, y = term, color = term)) +
+    ggplot2::geom_vline(xintercept = 1, linetype = 2, alpha = 0.5) +
+    ggplot2::geom_errorbar(ggplot2::aes(xmin = ci_lo, xmax = ci_hi), width = 0.1) +
+    ggplot2::geom_point() +
+    ggplot2::geom_text(
+      ggplot2::aes(label = formatC(odds_ratio, format = "f", digits = or_digits)),
+      nudge_y = 0.12, size = 3.3, show.legend = FALSE
+    ) +
+    ggplot2::labs(x = "Odds Ratio", y = NULL) +
+    ggplot2::guides(color = "none") +
+    ggplot2::scale_x_continuous(
+      breaks = x_breaks, limits = x_limits,
+      expand = ggplot2::expansion(mult = c(0.02, 0.03))
+    ) +
+    ggplot2::scale_y_discrete(limits = levels(coef_table$term), expand = y_expand) +
+    ggplot2::coord_cartesian(clip = "off") +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(size = 12, margin = ggplot2::margin(t = 6)),
+      axis.text.y = ggplot2::element_text(size = 12, margin = ggplot2::margin(r = 6)),
+      axis.title = ggplot2::element_text(size = 13),
+      plot.margin = pm
+    )
+
+  ci_plot <-
+    coef_table %>%
+    dplyr::mutate(
+      ci_label = paste0(
+        formatC(ci_lo, format = "f", digits = or_digits), " – ",
+        formatC(ci_hi_raw, format = "f", digits = or_digits)
+      )
+    ) %>%
+    ggplot2::ggplot(ggplot2::aes(x = 1, y = term)) +
+    ggplot2::geom_text(ggplot2::aes(label = ci_label), hjust = 0.5, size = 4) +
+    ggplot2::scale_y_discrete(limits = levels(coef_table$term), expand = y_expand) +
+    ggplot2::theme_void() +
+    ggplot2::ggtitle(ci_title) +
+    ggplot2::theme(plot.margin = pm,
+                   plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"))
+
+  pvalues_table_plot <-
+    coef_table %>%
+    dplyr::mutate(
+      pvalue = formatC(pvalue, digits = pval_digits, format = "fg", drop0trailing = FALSE)
+    ) %>%
+    ggplot2::ggplot(ggplot2::aes(x = 1, y = term)) +
+    ggplot2::geom_text(ggplot2::aes(label = pvalue), hjust = 0.5, size = 4) +
+    ggplot2::scale_y_discrete(limits = levels(coef_table$term), expand = y_expand) +
+    ggplot2::theme_void() +
+    ggplot2::ggtitle("P-value") +
+    ggplot2::theme(plot.margin = pm,
+                   plot.title = ggplot2::element_text(hjust = 0.5, face = "bold"))
+
+  odds_ratios_plot +
+    patchwork::plot_spacer() +
+    ci_plot +
+    pvalues_table_plot +
+    patchwork::plot_layout(ncol = 4, widths = widths)
 }
 ```
 
@@ -756,13 +1229,19 @@ For `date_first_treatment`,transform into dates and create > 2009 vs. not.
 df_uni <-
   df_uni %>%
   mutate(across(starts_with("date"), ~ parse_inconsistent_dates(.x))) %>% 
-  mutate(is_first_tx_after_2009 = date_first_treatment >= as.Date("2009-06-30"))
+  mutate(is_first_tx_after_2009 = 
+           date_first_treatment >= as.Date("2009-06-30")) %>%
+  mutate(is_first_tx_from_2001 =
+           date_first_treatment >= as.Date("2001-01-01"))
 
 # Fix dates and parse into Date format
 df_multi <-
   df_multi %>%
   mutate(across(starts_with("date"), ~ parse_inconsistent_dates(.x))) %>% 
-  mutate(is_first_tx_after_2009 = date_first_treatment >= as.Date("2009-06-30"))
+  mutate(is_first_tx_after_2009 = 
+           date_first_treatment >= as.Date("2009-06-30")) %>%
+  mutate(is_first_tx_from_2001 =
+           date_first_treatment >= as.Date("2001-01-01"))
 
 # Check for missingness
 num_missing <-
@@ -790,6 +1269,7 @@ cols <- unname(c(
   EXPOSURES_CONTINUOUS,
   EXPOSURES_BINARY,
   "is_first_tx_after_2009",
+  "is_first_tx_from_2001",
   EXPOSURES_CATEGORICAL,
   OUTCOMES
 ))
@@ -1036,7 +1516,7 @@ df_by_date <-
   group_by(year_first_treatment) %>% 
   summarize(
     num_patients = n(),
-    num_poor_outcome = sum(is_poor_outcome),
+    num_poor_outcome = sum(is_poor_outcome, na.rm = T),
     pct_poor_outcome = 100 * num_poor_outcome / num_patients
   )
 
@@ -1081,7 +1561,7 @@ df_by_date <-
   group_by(year_interval) %>% 
   summarize(
     num_patients = n(),
-    num_poor_outcome = sum(is_poor_outcome),
+    num_poor_outcome = sum(is_poor_outcome, na.rm = T),
     pct_poor_outcome = 100 * num_poor_outcome / num_patients
   )
 
@@ -1127,7 +1607,7 @@ df_by_date <-
   group_by(year_interval) %>% 
   summarize(
     num_patients = n(),
-    num_poor_outcome = sum(is_poor_outcome),
+    num_poor_outcome = sum(is_poor_outcome, na.rm = T),
     pct_poor_outcome = 100 * num_poor_outcome / num_patients
   )
 
@@ -1513,11 +1993,14 @@ if (!str_detect(params$TITLE, "grade")) {
 
 ## By date
 
+These values represent either the mean (continuous) or number and proportion (binary) of patients with the specific exposure before or after 2009. For example, for Spetzler-Martin grade < 4, the numbers represent the number and proportion of patients with SM 1-3 before vs. after 2009.
+
 ```{r}
 # Define arguments
 outcome_col <- "is_first_tx_after_2009"
-outcome_levels <- c(FALSE, TRUE)
+outcome_levels <- c(TRUE, FALSE)
 outcome_labels <- c("After Jun '09", "At or before Jun '09")
+avoid_columns <- c("is_first_tx_from_2001", "is_first_tx_after_2009")
 
 # Get all
 out <- list()
@@ -1532,7 +2015,7 @@ out[[1]] <- compute_descriptive_continuous(
   prefix = "All"
 )
 out[[2]] <- compute_descriptive_binary(
-  cols = EXPOSURES_BINARY[!EXPOSURES_BINARY %in% c("is_first_tx_after_2009")],
+  cols = EXPOSURES_BINARY[!EXPOSURES_BINARY %in% avoid_columns],
   outcome_col = outcome_col,
   outcome_levels = outcome_levels,
   outcome_labels = outcome_labels,
@@ -1553,6 +2036,117 @@ out_complete <-
 out_complete %>%
   sable()
 ```
+
+
+New analysis (as of Jul 8, 2026) to understand poor outcomes before and after 2001 by SM grade.
+
+These values represent either the mean (continuous) or number and proportion (binary) of patients with the specific exposure before or after 2001. For example, for Spetzler-Martin grade < 4, the numbers represent the number and proportion of patients with SM 1-3 before vs. after 2001.
+
+```{r}
+# Define arguments
+outcome_col <- "is_first_tx_from_2001"
+outcome_levels <- c(TRUE, FALSE)
+outcome_labels <- c("2001 onwards", "Before 2001")
+avoid_columns <- c("is_first_tx_from_2001", "is_first_tx_after_2009")
+
+# Get all
+out <- list()
+out[[1]] <- compute_descriptive_continuous(
+  outcome_col = outcome_col,
+  outcome_levels = outcome_levels,
+  outcome_labels = outcome_labels,
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out[[2]] <- compute_descriptive_binary(
+  cols = EXPOSURES_BINARY[!EXPOSURES_BINARY %in% avoid_columns],
+  outcome_col = outcome_col,
+  outcome_levels = outcome_levels,
+  outcome_labels = outcome_labels,
+  use_interaction = F,
+  interaction_col = interaction_col,
+  interaction_col_name = interaction_col_name,
+  interaction_col_value = T,
+  prefix = "All"
+)
+out_all <- bind_rows(out)
+
+# Synthesize
+out_complete <-
+  out_all %>%
+  arrange(`All - P-value`)
+
+# Print
+out_complete %>%
+  sable()
+```
+
+
+```{r}
+if (!str_detect(params$TITLE, "grade")) {
+  
+# One table row for a given data subset; `outcome` is a column name as a string
+era_row <- function(data, group_label, outcome = CHOSEN_OUTCOME) {
+  
+  # Total patients excluded for any missing (era or outcome)
+  missing <- sum(is.na(data$is_first_tx_from_2001) | is.na(data[[outcome]]))
+
+  # Only include cells with data
+  d <-
+    data %>%
+    filter(!is.na(is_first_tx_from_2001))
+  
+  # Fisher's exact test: era (2x2) vs outcome, within this group
+  p <- fisher.test(table(d$is_first_tx_from_2001, d[[outcome]]))$p.value
+  
+  # Create row
+  d %>%
+    mutate(era = factor(
+      if_else(is_first_tx_from_2001, "2001–2024", "1985–2000"),
+      levels = c("1985–2000", "2001–2024")
+    )) %>%
+    group_by(era, .drop = FALSE) %>%
+    summarise(
+      n = sum(.data[[outcome]], na.rm = TRUE),
+      N = sum(!is.na(.data[[outcome]])),
+      .groups = "drop"
+    ) %>%
+    rowwise() %>%
+    mutate(
+      `n (%)`  = if (N > 0) sprintf("%d/%d (%.1f%%)", n, N, 100 * n / N) else "0/0",
+      `95% CI` = if (N > 0) {
+        ci <- binom.test(n, N)$conf.int * 100
+        sprintf("%.1f–%.1f%%", ci[1], ci[2])
+      } else NA_character_
+    ) %>%
+    ungroup() %>%
+    select(era, `n (%)`, `95% CI`) %>%
+    pivot_wider(
+      names_from  = era,
+      values_from = c(`n (%)`, `95% CI`),
+      names_glue  = "{era} {.value}",
+      names_vary  = "slowest"
+    ) %>%
+    mutate(Group = group_label, "Missing era" = missing, .before = 1) %>%
+    mutate(`Fisher p` = format.pval(p, digits = 2, eps = 0.001))
+}
+
+# Create table
+tbl <- bind_rows(
+  era_row(df_uni, "Overall"),
+  era_row(filter(df_uni, is_spetzler_martin_grade_less_than_4), "SM 1–3"),
+  era_row(filter(df_uni, !is_spetzler_martin_grade_less_than_4), "SM 4–5")
+)
+
+# Print table
+sable(tbl)
+}
+```
+
+Interpretation: Poor functional outcome (modified Rankin Scale ≥3) was compared between treatment eras, defined by year of first treatment (1985–2000 vs 2001–2024). Overall, the rate of poor outcome was comparable across eras (6/51 [11.8%] vs 19/170 [11.2%]; Fisher's exact p = 1.00). This pattern was consistent within Spetzler–Martin (SM) grade strata. Among low-grade AVMs (SM 1–3), poor outcome occurred in 3/28 (10.7%) in the earlier era and 7/125 (5.6%) in the later era (p = 0.39). Among high-grade AVMs (SM 4–5), poor outcome occurred in 3/23 (13.0%) versus 12/45 (26.7%); although numerically higher in the later era, this difference did not reach statistical significance (p = 0.23) and was estimated with wide confidence intervals (95% CI 2.8–33.6% and 14.6–41.9%, respectively), reflecting the small number of events. No statistically significant difference in poor-outcome rate by treatment era was observed in any subgroup.
 
 
 ------------------------------------------------------------------------
@@ -2394,7 +2988,8 @@ unwanted_all <- c(
   # Use high vs. low grade instead of the granular for power
   "spetzler_martin_grade",
   # Irrelevant to treatment
-  "is_first_tx_after_2009"
+  "is_first_tx_after_2009",
+  "is_first_tx_from_2001"
 )
 
 # Remove interaction terms
@@ -2651,6 +3246,7 @@ beta <- coef(
   x = X,
   y = y,
   object = gfit,
+  # Not using lambda/n (unlike the vignette) to make selection more stringent
   s = lambda,
   exact = TRUE
 )
@@ -2699,6 +3295,30 @@ if (length(out) > 0) {
   print("No variables were selected")
 }
 ```
+
+
+Fit the model and inference.
+
+```{r}
+res <- fit_selective_lasso(
+  x = X_all_centered,
+  y = y_all,
+  nfolds = 10
+)
+```
+
+Table of coefficients.
+
+```{r}
+res$table %>% sable()
+```
+
+Paste the output for future reference.
+
+```{r}
+res
+```
+
 
 
 Plot the coefficients with their confidence intervals.
@@ -2848,7 +3468,8 @@ beta <- coef(
   x = X,
   y = y,
   object = gfit,
-  s = lambda/n,
+  # Not using lambda/n (unlike the vignette) to make selection more stringent
+  s = lambda,
   exact = TRUE
 )
 
@@ -2895,6 +3516,28 @@ if (length(out) > 0) {
   # Print 
   print("No variables were selected")
 }
+```
+
+
+```{r}
+# DIAGNOSTIC: tail areas should be ≈ alpha/2 = 0.05 per side.
+# Far from 0.05 => the interval search struggled and CIs are unreliable.
+print(round(out$tailarea, 3))
+```
+
+
+```{r}
+res <- fit_selective_lasso(
+  x = X_without_gradings_centered,
+  y = y_without_gradings,
+  nfolds = 10
+)
+```
+
+Results.
+
+```{r}
+res$table %>% sable()
 ```
 
 
@@ -3045,29 +3688,34 @@ beta <- coef(
   x = X,
   y = y,
   object = gfit,
+  # Not using lambda/n (unlike the vignette) to make selection more stringent
   s = lambda,
   exact = TRUE
 )
 
 # Estimate sigma
-gsigmahat <- estimateSigma(
-  x = X,
-  y = y,
-  intercept = TRUE,
-  standardize = TRUE
-)$sigmahat
+# (not taken into account in "binomial")
+# gsigmahat <- estimateSigma(
+#   x = X,
+#   y = y,
+#   intercept = TRUE,
+#   standardize = TRUE
+# )$sigmahat
 
 # Compute fixed lambda p-values and selection intervals
 out <- fixedLassoInf(
   x = X,
   y = y,
   beta = beta,
-  lambda = lambda,
+  # Lambda here needs to be * n the lambda b/c of the regularization term
+  # (if not, you'll get a warning that it does not satisfy KKT conditions)
+  lambda = lambda * n,
   # Level of significance (0.1 is 95% CI)
   alpha = 0.1,
   family = "binomial",
-  intercept = TRUE,
-  sigma = gsigmahat
+  intercept = TRUE
+  # Not taken into account in "binomial"
+  # sigma = gsigmahat
 )
 
 # Create model table (make this robust to no variable being selected)
@@ -3098,6 +3746,285 @@ robust_ci %>% sable()
 ```
 
 
+```{r}
+###################################
+# EXPERIMENTAL - NO STANDARDIZATION
+###################################
+
+# Set seed
+set.seed(141845)
+
+# Define values
+X <- X_with_gradings_centered
+y <- y_with_gradings
+n <- length(y)
+
+# Fixed folds for reproducibility (independent of RNG stream state)
+foldid <- sample(rep(seq_len(10), length.out = n))
+
+# Cross-validation
+# standardize = FALSE: X is already centered, and fixedLassoInf needs the SAME
+# design glmnet penalized, with a uniform penalty across columns
+cv_fit <- cv.glmnet(
+  x = X, y = y, family = "binomial", alpha = 1,
+  foldid = foldid, standardize = FALSE
+)
+
+
+best_lambda_min <- cv_fit$lambda.min
+best_lambda_1se <- cv_fit$lambda.1se
+
+# Full path (standardize = FALSE to match cv_fit and fixedLassoInf)
+gfit <- glmnet(
+  x = X, y = y, family = "binomial", alpha = 1,
+  intercept = TRUE, standardize = FALSE
+)
+
+# Choose lambda (glmnet scale)
+idx <- which(cv_fit$lambda %in% best_lambda_1se)
+num_coefs <- as.numeric(cv_fit$nzero[idx])
+if (num_coefs == 0) {
+  lambda <- cv_fit$lambda[idx + 3]
+} else {
+  lambda <- best_lambda_min
+}
+lambda <- best_lambda_min
+
+# Coefficients at the glmnet-scale lambda (active set = cv lambda.min; keep intercept)
+beta <- coef(object = gfit, x = X, y = y, s = lambda, exact = TRUE)
+
+# SCALING FIX: fixedLassoInf uses the "standard" objective (1/2)||y-Xb||^2 + λ||b||,
+# while glmnet scales the loss by 1/n. beta was extracted at glmnet's λ, so the
+# matching fixedLassoInf penalty is λ * n. (sigma is ignored for binomial → dropped.)
+out <- fixedLassoInf(
+  x = X, y = y, beta = beta,
+  lambda = lambda,        # <-- was `lambda`
+  alpha = 0.1,
+  family = "binomial",
+  intercept = TRUE
+)
+
+# Create model table (make this robust to no variable being selected)
+if (length(out) > 0) {
+
+  # Create table
+  robust_ci <- 
+    tibble(
+      term = names(out$vars),
+      odds_ratio = exp(out$coef0),
+      pvalue = out$pv,
+      ci_lo = exp(out$ci[, 1]),
+      ci_hi = exp(out$ci[, 2])
+    ) %>%
+    arrange(pvalue)
+  
+  # Print
+  robust_ci %>% sable()
+
+} else {
+
+  # Print 
+  print("No variables were selected")
+}
+
+# Print
+robust_ci %>% sable()
+```
+
+
+```{r}
+#################################
+# EXPERIMENTAL - FULL MANUAL STANDARDIZATION
+#################################
+
+set.seed(141845)
+
+# Full standardization (center + scale); keep SDs for back-transform
+X_raw  <- X_with_gradings
+X      <- scale(X_raw, center = TRUE, scale = TRUE)   # <- CHANGE 1
+col_sd <- attr(X, "scaled:scale")
+y      <- y_with_gradings
+n      <- length(y)
+
+foldid <- sample(rep(seq_len(10), length.out = n))
+
+cv_fit <- cv.glmnet(
+  x = X, y = y, family = "binomial", alpha = 1,
+  foldid = foldid, standardize = FALSE                # <- CHANGE 2 (was default TRUE)
+)
+best_lambda_min <- cv_fit$lambda.min
+
+gfit <- glmnet(
+  x = X, y = y, family = "binomial", alpha = 1,
+  intercept = TRUE, standardize = FALSE               # <- CHANGE 3 (was TRUE)
+)
+
+lambda <- best_lambda_min
+beta <- coef(object = gfit, x = X, y = y, s = lambda, exact = TRUE)
+
+out <- fixedLassoInf(
+  x = X, y = y, beta = beta,
+  lambda = lambda * n,
+  alpha = 0.1, family = "binomial", intercept = TRUE
+)
+
+print(round(out$tailarea, 3))
+
+if (length(out$vars) > 0) {
+  sds <- col_sd[out$vars]
+  robust_ci <-
+    tibble(
+      term       = names(out$vars),
+      odds_ratio = exp(out$coef0 / sds),
+      pvalue     = out$pv,
+      ci_lo      = exp(sweep(out$ci, 1, sds, "/")[, 1]),
+      ci_hi      = exp(sweep(out$ci, 1, sds, "/")[, 2])
+    ) %>%
+    arrange(pvalue)
+  robust_ci %>% sable()
+} else {
+  print("No variables were selected")
+}
+```
+
+
+
+```{r}
+set.seed(141845)
+
+X <- X_with_gradings_centered          # centered only — do NOT scale
+y <- y_with_gradings
+n <- length(y)
+
+foldid <- sample(rep(seq_len(10), length.out = n))
+
+cv_fit <- cv.glmnet(
+  x = X, y = y, family = "binomial", alpha = 1,
+  foldid = foldid, standardize = FALSE   # <- FALSE, and columns are unscaled
+)
+best_lambda_min <- cv_fit$lambda.min
+
+gfit <- glmnet(
+  x = X, y = y, family = "binomial", alpha = 1,
+  intercept = TRUE, standardize = FALSE
+)
+
+lambda <- best_lambda_min
+beta <- coef(object = gfit, x = X, y = y, s = lambda, exact = TRUE)
+
+out <- fixedLassoInf(
+  x = X, y = y, beta = beta,
+  lambda = lambda * n,
+  alpha = 0.1, family = "binomial", intercept = TRUE
+)
+
+print(round(out$tailarea, 3))
+
+# No back-transform needed: centering doesn't change slopes, so betas are already
+# on the original (per-unit / per-category) scale
+if (length(out$vars) > 0) {
+  robust_ci <-
+    tibble(
+      term       = names(out$vars),
+      odds_ratio = exp(out$coef0),
+      pvalue     = out$pv,
+      ci_lo      = exp(out$ci[, 1]),
+      ci_hi      = exp(out$ci[, 2])
+    ) %>%
+    arrange(pvalue)
+  robust_ci %>% sable()
+} else {
+  print("No variables were selected")
+}
+```
+
+
+```{r}
+#################
+# EXPERIMENTAL - NO STANDARDIZATION + LAMBDA INTERPOLATION
+########################
+
+set.seed(141845)
+X <- X_with_gradings_centered      # centered only
+y <- y_with_gradings
+n <- length(y)
+foldid <- sample(rep(seq_len(10), length.out = n))
+
+cv_fit <- cv.glmnet(x = X, y = y, family = "binomial", alpha = 1,
+                    foldid = foldid, standardize = FALSE)
+
+# --- Sweep: how many variables does each k-SE tolerance select? ---
+imin <- which.min(cv_fit$cvm)
+sweep_tbl <- purrr::map_dfr(seq(0, 1, 0.1), function(k) {
+  thr <- cv_fit$cvm[imin] + k * cv_fit$cvsd[imin]
+  lam <- max(cv_fit$lambda[cv_fit$cvm <= thr])
+  tibble(k = k, lambda = lam,
+         n_vars = as.integer(cv_fit$nzero[cv_fit$lambda == lam][1]))
+})
+print(sweep_tbl)
+
+```
+
+
+```{r}
+k <- 0.25  # <- set from the sweep, pre-specified
+thr    <- cv_fit$cvm[imin] + k * cv_fit$cvsd[imin]
+lambda <- max(cv_fit$lambda[cv_fit$cvm <= thr])
+
+gfit <- glmnet(x = X, y = y, family = "binomial", alpha = 1,
+               intercept = TRUE, standardize = FALSE)
+beta <- coef(object = gfit, x = X, y = y, s = lambda, exact = TRUE)
+
+out <- fixedLassoInf(x = X, y = y, beta = beta, lambda = lambda * n,
+                     alpha = 0.1, family = "binomial", intercept = TRUE)
+
+print(round(out$tailarea, 3))
+if (length(out$vars) > 0) {
+  robust_ci <- tibble(
+    term = names(out$vars), odds_ratio = exp(out$coef0), pvalue = out$pv,
+    ci_lo = exp(out$ci[, 1]), ci_hi = exp(out$ci[, 2])
+  ) %>% arrange(pvalue)
+  robust_ci %>% sable()
+} else print("No variables were selected")
+```
+
+
+
+```{r}
+# DIAGNOSTIC: tail areas should be ≈ alpha/2 = 0.05 per side.
+# Far from 0.05 => the interval search struggled and CIs are unreliable.
+print(round(out$tailarea, 3))
+```
+
+Fit the model and inference.
+
+```{r}
+res <- fit_selective_lasso(
+  x = X_with_gradings_centered,
+  y = y_with_gradings,
+  nfolds = 10
+)
+```
+
+Results.
+
+```{r}
+res$table %>% sable()
+```
+
+Paste the output for future reference.
+
+```{r}
+res
+```
+
+
+```{r}
+plots$odds_ratios_without_components <- plot_selective_or(res$table)
+plots$odds_ratios_without_components
+```
+
+
 Plot the coefficients with their confidence intervals.
 
 ```{r, fig.height=4, fig.width=8}
@@ -3107,6 +4034,9 @@ cols <- c(
   EXPOSURES_BINARY,
   EXPOSURES_CATEGORICAL
 )
+
+robust_ci <- res$table
+out <- res$fit
 
 # Define function to replace ugly with pretty names
 prettify_terms <- function(old_terms, col_names = cols) {
@@ -3250,6 +4180,7 @@ if (any(colnames(X) %in% "is_surgeryTRUE")) {
     x = X,
     y = y,
     object = gfit,
+    # Not using lambda/n (from vignette) to make selection more stringent
     s = lambda,
     exact = TRUE
   )
@@ -3404,7 +4335,7 @@ set.seed(141845)
 
 # Define values
 X <- X_with_gradings_centered
-y <- y_without_gradings
+y <- y_with_gradings
 
 if (any(colnames(X) %in% "is_surgeryTRUE")) {
   
@@ -3453,6 +4384,7 @@ if (any(colnames(X) %in% "is_surgeryTRUE")) {
     x = X,
     y = y,
     object = gfit,
+    # Not using lambda/n (from vignette) to make selection more stringent
     s = lambda,
     exact = TRUE
   )
@@ -3607,6 +4539,310 @@ if (length(out) > 0) {
 ```
 
 
+## All in one
+
+Fit the models for all conditions.
+
+```{r}
+# --- Helper: drop the surgery dummy when present ---
+drop_surgery <- function(x) x[, !colnames(x) %in% "is_surgeryTRUE", drop = FALSE]
+
+# --- All modelling conditions (x, y, and the plots$ slot to fill) ---
+conditions <- list(
+  all = list(
+    x = X_all_centered,
+    y = y_all,
+    plot_name = "odds_ratios_all_predictors"
+  ),
+  # Do not use the composite scores, but use their components
+  without_gradings = list(
+    x = X_without_gradings_centered,
+    y = y_without_gradings,
+    plot_name = "odds_ratios_with_components"
+  ),
+  # Use the composite scores, but not their components
+  with_gradings = list(
+    x = X_with_gradings_centered,
+    y = y_with_gradings,
+    plot_name = "odds_ratios_without_components"
+  ),
+  # Do not use the composite scores, but use their components
+  # Do not use the is_surgery feature b/c it's highly correlated with outcome
+  without_gradings_no_surgery = list(
+    x = drop_surgery(X_without_gradings_centered),
+    y = y_without_gradings,
+    plot_name = "odds_ratios_with_components_no_surgery"
+  ),
+  # Use the composite scores, but not their components
+  # Do not use the is_surgery feature b/c it's highly correlated with outcome
+  with_gradings_no_surgery = list(
+    x = drop_surgery(X_with_gradings_centered),
+    y = y_with_gradings,
+    plot_name = "odds_ratios_without_components_no_surgery"
+  )
+)
+
+# --- Fit for every condition (one failure won't kill the batch) ---
+results <-
+  purrr::imap(conditions, function(cond, name) {
+    message("=== ", name, " ===")
+    tryCatch(
+      # Fit the LASSO 
+      # Use k=1 for lambda.1se, k=0 for lambda.min, or nothing to find optimal
+      fit_selective_lasso(x = cond$x, y = cond$y, nfolds = 10),
+      error = function(e) {
+        message("  ERROR: ", conditionMessage(e))
+        NULL
+      }
+    )
+  })
+
+# --- One combined results table with the validity flag ---
+summary_tbl <-
+  purrr::imap_dfr(results, function(res, name) {
+    if (is.null(res)) {
+      tibble::tibble(condition = name, term = "(failed)", tailarea_ok = NA)
+    } else if (nrow(res$table) == 0) {
+      tibble::tibble(condition = name, term = "(none selected)", tailarea_ok = NA)
+    } else {
+      res$table %>%
+        dplyr::mutate(
+          condition = name,
+          k_lo = res$k_plateau[1],
+          k_hi = res$k_plateau[2],
+          tailarea_ok = res$tailarea_ok,
+          .before = 1
+        )
+    }
+  })
+
+summary_tbl %>% sable()
+```
+
+
+Forest plots.
+
+```{r}
+# --- Forest plot for every condition, stored under your plots$ names ---
+for (name in names(conditions)) {
+  res <- results[[name]]
+  if (!is.null(res)) {
+    plots[[conditions[[name]]$plot_name]] <- plot_selective_or(res$table)
+  }
+}
+```
+
+
+## With the bootstrap
+
+```{r}
+#' Run B bootstrap LASSO + selective-inference fits and store the raw draws
+#' @export
+bootstrap_lasso_raw <- function(
+    x, y,
+    B = 1000,
+    alpha = 0.05,
+    k = 0,                  # 0 = lambda.min (fast); NULL = full plateau
+    elastic_net_alpha = 1,
+    nfolds = 10,
+    standardize = FALSE,
+    seed = 141845,
+    progress = TRUE
+) {
+  set.seed(seed)
+  n <- length(y)
+  draws <- vector("list", B)
+  valid <- logical(B)
+
+  for (b in seq_len(B)) {
+    if (progress && b %% max(1, B %/% 10) == 0) message("  bootstrap ", b, " / ", B)
+
+    idx <- sample.int(n, n, replace = TRUE)
+    xb <- x[idx, , drop = FALSE]
+    yb <- y[idx]
+    if (length(unique(yb)) < 2) next
+
+    res <- tryCatch(
+      suppressMessages(suppressWarnings(
+        fit_selective_lasso(
+          x = xb, y = yb, alpha = alpha, k = k,
+          elastic_net_alpha = elastic_net_alpha, nfolds = nfolds,
+          standardize = standardize,
+          seed = NULL                     # <- crucial: don't reset the outer stream
+        )
+      )),
+      error = function(e) NULL
+    )
+    if (is.null(res)) next
+    valid[b] <- TRUE                      # valid even if it selected nothing
+    if (length(res$fit$vars) == 0) next
+
+    draws[[b]] <- tibble::tibble(
+      rep = b,
+      term = names(res$fit$vars),
+      log_or = as.numeric(res$fit$coef0),   # unregularized log-OR
+      si_p = as.numeric(res$fit$pv)         # NATIVE one-sided selective p (raw)
+    )
+  }
+
+  draws_all <- dplyr::bind_rows(draws)
+  message("Bootstrap complete: ", sum(valid), " / ", B, " valid resamples.")
+
+  list(
+    draws = draws_all,                    # long: rep, term, log_or, si_p
+    B = B,
+    B_valid = sum(valid),
+    n = n,
+    alpha = alpha,
+    terms = sort(unique(draws_all$term))
+  )
+}
+
+#' Summarise a raw bootstrap object (cheap; re-run as you tweak the analysis)
+#' @export
+summarize_bootstrap <- function(raw, alpha = raw$alpha, digits = 2) {
+
+  B_valid <- raw$B_valid
+  qlo <- alpha / 2
+  qhi <- 1 - alpha / 2
+
+  ci_str <- function(lo, hi) {
+    paste0(formatC(lo, format = "f", digits = digits), " – ",
+           formatC(hi, format = "f", digits = digits))
+  }
+  # two-sided percentile p, consistent with the percentile CI (no tie-split)
+  perc_p <- function(v) pmin(1, 2 * min(mean(v <= 0), mean(v >= 0)))
+
+  purrr::map_dfr(raw$terms, function(v) {
+    d <- dplyr::filter(raw$draws, term == v)
+    lo_sel <- d$log_or                                    # conditional
+    n_ch <- length(lo_sel)
+    lo_all <- c(lo_sel, rep(0, B_valid - n_ch))           # unconditional (0 imputed)
+    sip <- d$si_p
+
+    ci_c <- exp(quantile(lo_sel, c(qlo, qhi), names = FALSE))
+    ci_u <- exp(quantile(lo_all, c(qlo, qhi), names = FALSE))
+    sip_ci <- quantile(sip, c(qlo, qhi), names = FALSE, na.rm = TRUE)
+
+    tibble::tibble(
+      term = v,
+      pct_chosen = round(100 * n_ch / B_valid, 1),
+      OR_cond = round(exp(median(lo_sel)), digits),
+      OR_uncond = round(exp(median(lo_all)), digits),
+      `95% CI (cond.)` = ci_str(ci_c[1], ci_c[2]),
+      `95% CI (uncond.)` = ci_str(ci_u[1], ci_u[2]),
+      si_p_median = signif(median(sip, na.rm = TRUE), 3),
+      `si_p 95% int.` = ci_str(sip_ci[1], sip_ci[2]),
+      cond_p = signif(perc_p(lo_sel), 3),
+      uncond_p = signif(perc_p(lo_all), 3),
+      n_chosen = n_ch
+    )
+  }) %>%
+    dplyr::arrange(dplyr::desc(pct_chosen))
+}
+
+#' Bootstrap a named condition from the `conditions` list
+#' @export
+bootstrap_condition <- function(name, ...) {
+  cond <- conditions[[name]]
+  bootstrap_lasso_raw(x = cond$x, y = cond$y, ...)
+}
+```
+
+
+Helper to synthesize results into a table.
+
+```{r}
+build_comparison <- function(si_table, boot_cond, boot_uncond, digits = 2) {
+
+  fmt_ci <- function(lo, hi) {
+    paste0(formatC(lo, format = "f", digits = digits), " – ",
+           formatC(hi, format = "f", digits = digits))
+  }
+
+  boot_cond %>%
+    dplyr::transmute(
+      term,
+      pct_chosen = round(pct_chosen, 1),
+      OR = round(odds_ratio, digits),              # conditional-bootstrap OR
+      `95% CI (cond.)` = fmt_ci(ci_lo, ci_hi),
+      cond_p = pvalue
+    ) %>%
+    dplyr::left_join(
+      boot_uncond %>%
+        dplyr::transmute(term,
+                         `95% CI (uncond.)` = fmt_ci(ci_lo, ci_hi),
+                         uncond_p = pvalue),
+      by = "term"
+    ) %>%
+    dplyr::left_join(
+      si_table %>% dplyr::transmute(term, si_p = pvalue),
+      by = "term"
+    ) %>%
+    dplyr::transmute(
+      term,
+      pct_chosen,
+      OR,
+      `95% CI (cond.)`,
+      `95% CI (uncond.)`,
+      si_p     = signif(si_p, 3),
+      cond_p   = signif(cond_p, 3),
+      uncond_p = signif(uncond_p, 3)
+    ) %>%
+    dplyr::arrange(dplyr::desc(pct_chosen))
+}
+```
+
+
+Run.
+
+```{r}
+# Slow!
+raw_wg  <- bootstrap_condition("all", B = 1000)
+
+# Save results for posterity
+saveRDS(raw_wg, "bootstrap_raw_with_gradings.rds")
+
+summarize_bootstrap(raw_wg) %>% sable()
+```
+
+
+Run the bootstrap for all.
+
+```{r}
+# ---- Run the bootstrap for every condition (slow: do once, then save) ----
+raw_all <- purrr::imap(conditions, function(cond, name) {
+  message("=== bootstrap: ", name, " ===")
+  bootstrap_lasso_raw(x = cond$x, y = cond$y, B = 1000)
+})
+saveRDS(raw_all, "bootstrap_raw_all_conditions.rds")
+
+# ---- Summarise each + attach the full-data selective-inference values ----
+#      si_p1_full is the full-data ONE-SIDED selective p, so it's on the same
+#      footing as the bootstrap's si_p_median (also one-sided).
+bootstrap_summary_all <-
+  purrr::imap_dfr(raw_all, function(raw, name) {
+    summarize_bootstrap(raw) %>%
+      dplyr::left_join(
+        results[[name]]$table %>%
+          dplyr::transmute(
+            term,
+            si_or_full = round(odds_ratio, 2),
+            si_p1_full = signif(pvalue_1sided, 3)   # use `pvalue` if you didn't keep the 1-sided col
+          ),
+        by = "term"
+      ) %>%
+      dplyr::mutate(condition = name, B_valid = raw$B_valid, .before = 1)
+  })
+
+# ---- Save ----
+readr::write_csv(
+  bootstrap_summary_all,
+  "bootstrap_summary_all_conditions.csv"
+)
+```
+
+
 ------------------------------------------------------------------------
 
 # Multivariable - Without scores
@@ -3730,7 +4966,7 @@ fit_summary <-
   rename(odds_ratio = estimate, z_value = statistic)
 
 # Stylize and print
-multivariable_pvalue <-
+multivariable_pvalue_without_scores <-
   fit_summary %>%
   rename(
     "Predictors" = term,
@@ -3750,7 +4986,7 @@ multivariable_pvalue <-
   )
 
 # Print
-multivariable_pvalue %>% sable()
+multivariable_pvalue_without_scores %>% sable()
 ```
 
 
@@ -4064,8 +5300,8 @@ pval_threshold <- 0.2
 
 # Get the predictors of interest
 predictors <-
-  univariable_unadjusted_recoded %>%
-  bind_rows(univariable_adjusted) %>%
+  univariable_adjusted_recoded %>%
+  bind_rows(univariable_unadjusted_recoded) %>%
   filter(`P-values` < pval_threshold) %>%
   pull(`Predictors`)
 
@@ -4092,7 +5328,7 @@ Fit logistic.
 
 ```{r}
 # Define data
-df <- df_multi
+df <- df_multi %>% drop_na(modified_rankin_score_pretreatment, location)
 
 # Create formula
 model <- as.formula(paste(
@@ -4172,7 +5408,7 @@ fit_summary <-
   rename(odds_ratio = estimate, z_value = statistic)
 
 # Stylize and print
-multivariable_pvalue <-
+multivariable_pvalue_without_components <-
   fit_summary %>%
   rename(
     "Predictors" = term,
@@ -4192,7 +5428,7 @@ multivariable_pvalue <-
   )
 
 # Print
-multivariable_pvalue %>% sable()
+multivariable_pvalue_without_components %>% sable()
 ```
 
 
@@ -4692,7 +5928,7 @@ fit_summary <-
   rename(odds_ratio = estimate, z_value = statistic)
 
 # Stylize and print
-multivariable_pvalue <-
+multivariable_pvalue_sm_grade <-
   fit_summary %>%
   rename(
     "Predictors" = term,
@@ -4712,7 +5948,7 @@ multivariable_pvalue <-
   )
 
 # Print
-multivariable_pvalue %>% sable()
+multivariable_pvalue_sm_grade %>% sable()
 ```
 
 
@@ -4863,7 +6099,7 @@ fit_summary <-
   rename(odds_ratio = estimate, z_value = statistic)
 
 # Stylize and print
-multivariable_pvalue <-
+multivariable_pvalue_had_surgery <-
   fit_summary %>%
   rename(
     "Predictors" = term,
@@ -4883,7 +6119,7 @@ multivariable_pvalue <-
   )
 
 # Print
-multivariable_pvalue %>% sable()
+multivariable_pvalue_had_surgery %>% sable()
 ```
 
 
@@ -4942,6 +6178,2614 @@ df_uni %>%
 
 
 ------------------------------------------------------------------------
+# ALL IN ONE
+
+```{r}
+# ============================================================================
+# Consolidated results export
+#   Rows: (condition, term).  Prefixes: boot_lasso_, lasso_opt_, lasso_min_,
+#   multi_, uni_, step_ (fs->logistic), fs_ (native fs, linear scale).
+#   Writes each method's own CSV + one combined CSV.
+# ============================================================================
+
+# ---- CONFIG: point these at your objects (edit names to match) -------------
+UNI_TABLE  <- univariable_unadjusted_recoded          # shown only on the "all" rows
+STEP_FSINF <- out.aic                                 # fsInf object (linear scale)
+STEP_X     <- X_without_gradings_centered             # design fs() was run on
+STEP_Y     <- y_without_gradings                       # outcome fs() was run on
+
+MULTI_BY_CONDITION <- list(
+  all                         = NULL,
+  with_gradings               = multivariable_pvalue_without_components,
+  without_gradings            = multivariable_pvalue_without_scores,
+  with_gradings_no_surgery    = NULL,
+  without_gradings_no_surgery = NULL
+)
+
+# ---- Helpers ---------------------------------------------------------------
+prefix_cols <- function(df, pre) dplyr::rename_with(df, ~ paste0(pre, "_", .x), -term)
+round_readable <- function(df, digits = 3)
+  dplyr::mutate(df, dplyr::across(dplyr::where(is.numeric), ~ signif(.x, digits)))
+
+ci_str <- function(lo, hi, digits = 3)
+  ifelse(is.na(lo) | is.na(hi), NA_character_,
+         paste0(signif(lo, digits), " - ", signif(hi, digits)))
+
+# uni / multi (glm/broom output) -> common schema
+norm_orlike <- function(tbl) {
+  tbl %>% dplyr::transmute(
+    term = .data[["Predictors"]],
+    OR   = .data[["Odds Ratios (OR)"]],
+    SE   = .data[["SE"]],
+    ci   = ci_str(.data[["CI (low)"]], .data[["CI (high)"]]),
+    pval = .data[["P-values"]]
+  )
+}
+
+# Selective inference (95% + 90% + one-sided; no closed-form SE)
+si_block <- function(x, y, k) {
+  f95 <- suppressMessages(fit_selective_lasso(x, y, alpha = 0.05, k = k))
+  f90 <- suppressMessages(fit_selective_lasso(x, y, alpha = 0.10, k = k))
+  f95$table %>%
+    dplyr::transmute(
+      term, OR = odds_ratio, SE = NA_real_,
+      ci95 = ci_str(ci_lo, ci_hi),
+      pval = pvalue, pval_1sided = pvalue_1sided
+    ) %>%
+    dplyr::left_join(
+      f90$table %>% dplyr::transmute(term, ci90 = ci_str(ci_lo, ci_hi)),
+      by = "term"
+    )
+}
+
+# Bootstrap block (n_chosen, pct_chosen first; si_pval before cond/uncond)
+boot_block <- function(raw, alpha = 0.05) {
+  B <- raw$B_valid; qlo <- alpha/2; qhi <- 1 - alpha/2
+  perc_p <- function(v) pmin(1, 2 * min(mean(v <= 0), mean(v >= 0)))
+  purrr::map_dfr(raw$terms, function(v) {
+    d <- dplyr::filter(raw$draws, term == v); lo <- d$log_or; nch <- length(lo)
+    loall <- c(lo, rep(0, B - nch))
+    cc <- exp(quantile(lo,    c(qlo, qhi), names = FALSE))
+    uu <- exp(quantile(loall, c(qlo, qhi), names = FALSE))
+    sp <-     quantile(d$si_p, c(qlo, qhi), names = FALSE, na.rm = TRUE)
+    tibble::tibble(
+      term = v, n_chosen = nch, pct_chosen = 100 * nch / B,
+      OR_cond = exp(median(lo)), OR_uncond = exp(median(loall)), SE = sd(lo),
+      ci_cond = ci_str(cc[1], cc[2]), ci_uncond = ci_str(uu[1], uu[2]),
+      si_pval_median = median(d$si_p, na.rm = TRUE),
+      si_pval_int    = ci_str(sp[1], sp[2]),
+      cond_pval = perc_p(lo), uncond_pval = perc_p(loall)
+    )
+  })
+}
+
+# Stepwise -> LOGISTIC refit on the fs-selected variables (real ORs)
+step_block <- function(fsinf, X, y) {
+  vars <- colnames(X)[fsinf$vars]
+  df   <- data.frame(.y = y, X[, vars, drop = FALSE], check.names = FALSE)
+  fit  <- suppressWarnings(glm(.y ~ ., data = df, family = binomial()))
+  co   <- summary(fit)$coefficients
+  ci   <- stats::confint.default(fit)
+  keep <- setdiff(rownames(co), "(Intercept)")
+  tibble::tibble(
+    term = keep,
+    OR   = exp(co[keep, "Estimate"]),
+    SE   = co[keep, "Std. Error"],
+    ci   = ci_str(exp(ci[keep, 1]), exp(ci[keep, 2])),
+    pval = co[keep, "Pr(>|z|)"]
+  )
+}
+
+# Native fs (selective inference, LINEAR scale — coefficients, not ORs)
+fs_block <- function(fsinf, X) {
+  coef_lin <- as.numeric(fsinf$vmat %*% fsinf$y)
+  tibble::tibble(
+    term = colnames(X)[fsinf$vars],
+    coef = coef_lin,                                # linear-scale, NOT an OR
+    ci   = ci_str(fsinf$ci[, 1], fsinf$ci[, 2]),    # linear-scale selective CI
+    pval = fsinf$pv                                 # one-sided selective p
+  )
+}
+
+# ---- Build per-condition, stacked (boot_lasso first) ----------------------
+per_cond <-
+  purrr::imap(conditions, function(cond, name) {
+    lopt     <- si_block(cond$x, cond$y, k = NULL)   # fit once
+    vars_opt <- lopt$term                            # LASSO-selected set for this condition
+
+    blocks <- list(
+      boot_block(raw_all[[name]])           %>% prefix_cols("boot_lasso"),
+      lopt                                  %>% prefix_cols("lasso_opt"),
+      si_block(cond$x, cond$y, k = 0)       %>% prefix_cols("lasso_min"),
+      firth_block(cond$x, cond$y, vars_opt) %>% prefix_cols("firth")
+    )
+    m <- MULTI_BY_CONDITION[[name]]
+    if (!is.null(m)) blocks <- c(blocks, list(norm_orlike(m) %>% prefix_cols("multi")))
+
+    purrr::reduce(blocks, dplyr::full_join, by = "term") %>%
+      dplyr::mutate(condition = name, .before = 1)
+  })
+
+combined <- dplyr::bind_rows(per_cond)
+
+# uni + step (logistic) + fs (native) attach only to the "all" rows
+extra_all <-
+  purrr::reduce(
+    list(
+      norm_orlike(UNI_TABLE)                 %>% prefix_cols("uni"),
+      step_block(STEP_FSINF, STEP_X, STEP_Y) %>% prefix_cols("step"),
+      fs_block(STEP_FSINF, STEP_X)           %>% prefix_cols("fs")
+    ),
+    dplyr::full_join, by = "term"
+  ) %>%
+  dplyr::mutate(condition = "all")
+
+combined <-
+  combined %>%
+  dplyr::full_join(extra_all, by = c("condition", "term")) %>%
+  dplyr::arrange(condition, dplyr::desc(boot_lasso_pct_chosen))
+
+# ---- Write: each method its own CSV + the combined file --------------------
+readr::write_csv(round_readable(combined),
+                 file.path(csv_folder, "results_combined_all_methods.csv"))
+
+readr::write_csv(
+  round_readable(purrr::imap_dfr(conditions, function(cond, name)
+    si_block(cond$x, cond$y, NULL) %>% dplyr::mutate(condition = name, .before = 1))),
+  file.path(csv_folder, "results_lasso_optimal.csv")
+)
+readr::write_csv(
+  round_readable(purrr::imap_dfr(conditions, function(cond, name)
+    si_block(cond$x, cond$y, 0) %>% dplyr::mutate(condition = name, .before = 1))),
+  file.path(csv_folder, "results_lasso_min.csv")
+)
+readr::write_csv(
+  round_readable(purrr::imap_dfr(raw_all, function(raw, name)
+    boot_block(raw) %>% dplyr::mutate(condition = name, .before = 1))),
+  file.path(csv_folder, "results_bootstrap.csv")
+)
+readr::write_csv(round_readable(step_block(STEP_FSINF, STEP_X, STEP_Y)),
+                 file.path(csv_folder, "results_stepwise_logistic.csv"))
+readr::write_csv(round_readable(fs_block(STEP_FSINF, STEP_X)),
+                 file.path(csv_folder, "results_fs_native_linear.csv"))
+readr::write_csv(
+  round_readable(
+    combined %>%
+      dplyr::select(condition, term, dplyr::starts_with("firth_")) %>%
+      dplyr::filter(dplyr::if_any(dplyr::starts_with("firth_"), ~ !is.na(.)))
+  ),
+  file.path(csv_folder, "results_firth.csv")
+)
+```
+
+
+# ALL IN ONE 2
+
+## Setup
+
+```{r}
+# Which methods to run/include (all TRUE by default)
+METHODS <- list(
+  selective_lasso = TRUE,   # lasso_opt_ + lasso_min_
+  bootstrap       = TRUE,   # boot_lasso_
+  split           = TRUE,   # split_  (multi-sample splitting)
+  firth           = TRUE,   # firth_
+  stepwise        = TRUE,   # step_ (logistic) + fs_ (native)
+  univariable     = TRUE,   # uni_
+  multivariable   = TRUE    # multi_
+)
+
+MULTI_BY_CONDITION <- list(
+  all                         = NULL,
+  with_gradings               = multivariable_pvalue_without_components,
+  without_gradings            = multivariable_pvalue_without_scores,
+  with_gradings_no_surgery    = NULL,
+  without_gradings_no_surgery = NULL
+)
+
+# --- All modelling conditions (x, y, and the plots$ slot to fill) ---
+conditions <- list(
+  all = list(
+    x = X_all_centered,
+    y = y_all,
+    plot_name = "odds_ratios_all_predictors"
+  ),
+  # Do not use the composite scores, but use their components
+  without_gradings = list(
+    x = X_without_gradings_centered,
+    y = y_without_gradings,
+    plot_name = "odds_ratios_with_components"
+  ),
+  # Use the composite scores, but not their components
+  with_gradings = list(
+    x = X_with_gradings_centered,
+    y = y_with_gradings,
+    plot_name = "odds_ratios_without_components"
+  ),
+  # Do not use the composite scores, but use their components
+  # Do not use the is_surgery feature b/c it's highly correlated with outcome
+  without_gradings_no_surgery = list(
+    x = drop_surgery(X_without_gradings_centered),
+    y = y_without_gradings,
+    plot_name = "odds_ratios_with_components_no_surgery"
+  ),
+  # Use the composite scores, but not their components
+  # Do not use the is_surgery feature b/c it's highly correlated with outcome
+  with_gradings_no_surgery = list(
+    x = drop_surgery(X_with_gradings_centered),
+    y = y_with_gradings,
+    plot_name = "odds_ratios_without_components_no_surgery"
+  )
+)
+```
+
+
+## Methods
+
+```{r}
+# =============================================================================
+# Modeling methods library
+# -----------------------------------------------------------------------------
+# Every modeling method is defined here as a single documented function, and a
+# lone orchestrator (`run_all_methods()`) applies them to a set of conditions
+# and writes the per-method and combined CSVs.
+#
+# Methods and their column prefixes in the combined table:
+#   * lasso_opt_ / lasso_min_  selective-inference LASSO (fit_selective_lasso)
+#   * boot_lasso_              bootstrap of the selective-inference LASSO
+#   * split_                   multi-sample splitting with cross-fitting
+#   * firth_                   Firth penalised logistic on the selected set
+#   * step_ / fs_             forward stepwise (logistic refit / native linear)
+#   * multi_                  p-value-screened multivariable logistic
+#   * uni_                    univariable logistic
+#
+# Reading guide for the tricky parts:
+#   - Selective inference: `fit_selective_lasso()` corrects p-values/CIs for the
+#     fact that the LASSO chose the variables. Its comments explain the lambda
+#     scaling, the standardisation choice, and the stable-plateau rule.
+#   - Split (`fit_split_lasso()`): the only method whose p-values are BOTH
+#     selection-corrected AND on a scale a clinician reads directly, because it
+#     selects on one half of the data and tests on the other (never the same
+#     rows), then aggregates over many random splits (Meinshausen, Meier &
+#     Buhlmann 2009). Cross-fitting uses each half for both roles.
+# =============================================================================
+
+
+# ---- Formatting helpers -----------------------------------------------------
+
+#' Combine two bounds into one readable "lo - hi" string
+#'
+#' @param lo,hi Numeric vectors of lower and upper bounds.
+#' @param digits Significant digits.
+#' @return Character vector; `NA` where either bound is `NA`.
+#' @export
+ci_str <- function(lo, hi, digits = 3) {
+  # Return NA when a bound is missing, else a rounded "lo - hi" string
+  ifelse(
+    is.na(lo) | is.na(hi),
+    NA_character_,
+    paste0(signif(lo, digits), " - ", signif(hi, digits))
+  )
+}
+
+
+#' Prefix every non-`term` column of a block
+#'
+#' @param df A tibble with a `term` column.
+#' @param pre Prefix string (e.g. `"lasso_opt"`).
+#' @return `df` with columns renamed `<pre>_<col>`.
+#' @export
+prefix_cols <- function(df, pre) {
+  # Rename all columns except `term` to `<pre>_<col>`
+  dplyr::rename_with(df, ~ paste0(pre, "_", .x), -term)
+}
+
+
+#' Round all numeric columns to a readable number of significant digits
+#'
+#' @param df A tibble.
+#' @param digits Significant digits (keeps small p-values legible).
+#' @return `df` with numeric columns passed through `signif()`.
+#' @export
+round_readable <- function(df, digits = 3) {
+  # Apply signif() to every numeric column (leaves strings/CIs untouched)
+  dplyr::mutate(df, dplyr::across(dplyr::where(is.numeric), ~ signif(.x, digits)))
+}
+
+
+#' Turn raw model.matrix term names into readable labels
+#'
+#' @param old_terms Character vector of raw term names.
+#' @param col_names Named lookup vector (name = label, value = variable).
+#' @return Character vector of labels; unmatched terms fall back to the raw name.
+#' @importFrom stringr str_extract str_replace
+#' @importFrom purrr map_chr
+#' @export
+prettify_terms <- function(old_terms, col_names) {
+  # Trailing capitalised part is the factor level (e.g. "TRUE", "Deep")
+  factor_terms <- stringr::str_extract(old_terms, "[A-Z].*")
+  # Base variable name is what remains after stripping that level
+  base_terms <- stringr::str_replace(old_terms, "[A-Z].*$", "")
+  # Look up the human label; fall back to the raw name when not found
+  new_terms <-
+    purrr::map_chr(base_terms, function(bt) {
+      label <- names(col_names)[col_names == bt]
+      if (length(label) == 0) bt else label[1]
+    })
+  # Re-attach the factor level when there was one
+  ifelse(
+    is.na(factor_terms),
+    new_terms,
+    paste(new_terms, factor_terms, sep = " - ")
+  )
+}
+
+
+#' Normalise a glm/broom style OR table to the common schema
+#'
+#' @param tbl Tibble with columns `Predictors`, `Odds Ratios (OR)`, `SE`,
+#'   `CI (low)`, `CI (high)`, `P-values` (the univariable/multivariable format).
+#' @return Tibble of `term`, `OR`, `SE`, `ci`, `pval`.
+#' @export
+norm_orlike <- function(tbl) {
+  # Map the stylised univariable/multivariable columns onto the shared schema
+  tbl %>%
+    dplyr::transmute(
+      term = .data[["Predictors"]],
+      OR = .data[["Odds Ratios (OR)"]],
+      SE = .data[["SE"]],
+      ci = ci_str(.data[["CI (low)"]], .data[["CI (high)"]]),
+      pval = .data[["P-values"]]
+    )
+}
+
+
+# ---- Internal fitters (small, shared building blocks) -----------------------
+
+#' Select variables by LASSO at lambda.min (internal)
+#'
+#' @param x Centred design matrix.
+#' @param y 0/1 outcome.
+#' @param nfolds CV folds.
+#' @param elastic_net_alpha glmnet mixing (1 = lasso).
+#' @param standardize glmnet column standardisation.
+#' @return Character vector of selected variable names (no intercept).
+#' @keywords internal
+select_lasso_vars <- function(
+    x,
+    y,
+    nfolds = 10,
+    elastic_net_alpha = 1,
+    standardize = FALSE
+) {
+  # Cross-validate to find lambda.min
+  cv <-
+    glmnet::cv.glmnet(
+      x = x,
+      y = y,
+      family = "binomial",
+      alpha = elastic_net_alpha,
+      nfolds = nfolds,
+      standardize = standardize
+    )
+  # Read the coefficients at lambda.min
+  b <- as.matrix(coef(cv, s = "lambda.min"))
+  # Return the non-zero, non-intercept variable names
+  setdiff(rownames(b)[b[, 1] != 0], "(Intercept)")
+}
+
+
+#' Logistic estimate + Wald p-values on a fixed variable set (internal)
+#'
+#' @param x Design matrix.
+#' @param y 0/1 outcome.
+#' @param vars Variable names to include.
+#' @return List of `terms`, `coef` (log-OR), `se`, `pval`; `NULL` on failure.
+#' @keywords internal
+glm_estimate <- function(x, y, vars) {
+  # Nothing to estimate if no variables were passed
+  if (length(vars) == 0) return(NULL)
+  # Build a data frame with the outcome and the selected columns
+  df <- data.frame(.y = y, x[, vars, drop = FALSE], check.names = FALSE)
+  # Fit ordinary logistic regression (may warn under separation)
+  fit <- tryCatch(
+    suppressWarnings(glm(.y ~ ., data = df, family = binomial())),
+    error = function(e) NULL
+  )
+  # Bail out gracefully if the fit failed
+  if (is.null(fit)) return(NULL)
+  # Pull the coefficient table and drop the intercept row
+  co <- summary(fit)$coefficients
+  keep <- setdiff(rownames(co), "(Intercept)")
+  # Bail out if only the intercept survived
+  if (length(keep) == 0) return(NULL)
+  # Return log-ORs, SEs and p-values aligned to the kept terms
+  list(
+    terms = keep,
+    coef = co[keep, "Estimate"],
+    se = co[keep, "Std. Error"],
+    pval = co[keep, "Pr(>|z|)"]
+  )
+}
+
+
+# ---- Method 1: selective-inference LASSO ------------------------------------
+
+#' Selective-inference LASSO for a binary outcome
+#'
+#' @description
+#' Fit an L1-penalised logistic regression, choose a regularisation-stable model
+#' (or a user-specified one), and return post-selection (selective) p-values and
+#' confidence intervals via [selectiveInference::fixedLassoInf()]. This is the
+#' method that formally corrects the inference for the model-selection step.
+#'
+#' @details
+#' Design decisions baked in from debugging on small, separation-prone data:
+#'
+#' * **Centred, unscaled `x`.** Scaling the columns (equivalently
+#'   `glmnet(standardize = TRUE)`) pushed the observed statistics onto the
+#'   boundary of the truncation region and produced infinite intervals.
+#' * **`standardize = FALSE`**, so glmnet penalises exactly the design handed to
+#'   `fixedLassoInf` with a uniform penalty.
+#' * **`lambda * n`.** `fixedLassoInf` uses the standard lasso objective while
+#'   glmnet scales the loss by `1/n`; `beta` is read at glmnet's `lambda`, so the
+#'   matching penalty is `lambda * n` (otherwise the KKT check fails).
+#' * **Fixed folds** via an explicit `foldid` for reproducibility.
+#' * **Stable-plateau selection.** A fractional-SE sweep generalises the 1-SE
+#'   rule; with `k = NULL` the function takes the longest run of tolerances that
+#'   select an identical variable set. `k = 0` reproduces `lambda.min`, `k = 1`
+#'   reproduces `lambda.1se`. This is a pre-specified rule, not tuned to results.
+#'
+#' The reported `pvalue` is the two-sided (doubled) selective p; `pvalue_1sided`
+#' is the package-native one-sided p (one-sided because the LASSO already fixed
+#' the sign, so the test conditions on that direction).
+#'
+#' @param x Numeric design matrix (`n` x `p`), PRE-CENTRED, NOT column-scaled.
+#' @param y Numeric 0/1 outcome of length `n`.
+#' @param family glmnet family; validated for `"binomial"`.
+#' @param elastic_net_alpha glmnet mixing (1 = lasso, 0 = ridge).
+#' @param nfolds Cross-validation folds.
+#' @param k_grid Fractional-SE tolerances to sweep in `[0, 1]`.
+#' @param k Optional single tolerance; overrides the plateau search.
+#' @param alpha Significance level: CI is `100(1-alpha)%`, two-sided p vs `alpha`.
+#' @param intercept Fit an intercept (must be `TRUE` for binomial).
+#' @param standardize glmnet column standardisation. Keep `FALSE`.
+#' @param seed Seed for folds; pass `NULL` inside resampling loops so the outer
+#'   RNG stream is not reset.
+#' @param min_vars Minimum model size (never a zero-variable model).
+#' @param tailarea_tol Tolerance for the `tailarea_ok` validity flag.
+#'
+#' @return A list with `sweep`, `k_plateau`, `lambda`, `fit`, `table`, `n_vars`,
+#'   `variables`, `tailarea`, `tailarea_ok`, `alpha`, `ci_level`.
+#' @importFrom glmnet cv.glmnet glmnet
+#' @importFrom selectiveInference fixedLassoInf
+#' @importFrom purrr map_dfr
+#' @importFrom tibble tibble
+#' @importFrom dplyr filter arrange desc
+#' @export
+fit_selective_lasso <- function(
+    x,
+    y,
+    family = "binomial",
+    elastic_net_alpha = 1,
+    nfolds = 10,
+    k_grid = seq(0, 1, 0.05),
+    k = NULL,
+    alpha = 0.05,
+    intercept = TRUE,
+    standardize = FALSE,
+    seed = 141845,
+    min_vars = 1,
+    tailarea_tol = 0.01
+) {
+
+  # ---- 0. Setup + reproducible folds (NULL seed = don't reset the stream) ---
+  # Seed only when asked (bootstrap passes NULL to keep the outer RNG intact)
+  if (!is.null(seed)) set.seed(seed)
+  # Sample size and fixed fold assignment for reproducible cross-validation
+  n <- length(y)
+  foldid <- sample(rep(seq_len(nfolds), length.out = n))
+
+  # ---- 1. Cross-validation: lambda path + CV-error curve --------------------
+  # Cross-validate the penalised logistic to get the lambda path and CV error
+  cv_fit <-
+    glmnet::cv.glmnet(
+      x = x,
+      y = y,
+      family = family,
+      alpha = elastic_net_alpha,
+      foldid = foldid,
+      standardize = standardize
+    )
+
+  # ---- 2. Full-path fit: single, clean source for coefficient reads ---------
+  # Refit the full path standalone so exact = TRUE has a well-formed call
+  gfit <-
+    glmnet::glmnet(
+      x = x,
+      y = y,
+      family = family,
+      alpha = elastic_net_alpha,
+      intercept = intercept,
+      standardize = standardize
+    )
+
+  # ---- 3. Fractional-SE sweep: record the selected set at each tolerance -----
+  # Index of the minimum CV error, the anchor for the SE tolerance
+  imin <- which.min(cv_fit$cvm)
+  # For each tolerance k, record lambda and the identity of the selected set
+  sweep <-
+    purrr::map_dfr(k_grid, function(k) {
+      # Threshold on the CV-error scale and the most-regularised lambda under it
+      thr <- cv_fit$cvm[imin] + k * cv_fit$cvsd[imin]
+      lam <- max(cv_fit$lambda[cv_fit$cvm <= thr])
+      # Selected (non-zero, non-intercept) variables at that lambda
+      b <- as.matrix(coef(gfit, s = lam))
+      vars <- setdiff(rownames(b)[b[, 1] != 0], "(Intercept)")
+      # One row per tolerance: lambda, model size, and a set fingerprint
+      tibble::tibble(
+        k = k,
+        lambda = lam,
+        n_vars = length(vars),
+        var_key = paste(sort(vars), collapse = "|")
+      )
+    })
+
+  # ---- 4. Most stable non-empty plateau (used only when k is NULL) ----------
+  # Run-length encode the fingerprints into contiguous plateaus
+  runs <- rle(sweep$var_key)
+  ends <- cumsum(runs$lengths)
+  starts <- ends - runs$lengths + 1L
+  # Rank plateaus: longest first, tie-break toward more regularisation
+  plateaus <-
+    tibble::tibble(
+      var_key = runs$values,
+      len = runs$lengths,
+      start = starts,
+      end = ends,
+      n_vars = sweep$n_vars[starts]
+    ) %>%
+    dplyr::filter(n_vars >= min_vars) %>%
+    dplyr::arrange(dplyr::desc(len), dplyr::desc(start))
+
+  # ---- 5. Choose lambda: user k, else plateau centre, else lambda.min -------
+  # Pick lambda per priority order and record the tolerance range it spans
+  if (!is.null(k)) {
+    # User-supplied tolerance
+    thr <- cv_fit$cvm[imin] + k * cv_fit$cvsd[imin]
+    lambda <- max(cv_fit$lambda[cv_fit$cvm <= thr])
+    k_plateau <- c(k, k)
+  } else if (nrow(plateaus) > 0) {
+    # Centre of the most stable plateau
+    best <- plateaus[1, ]
+    mid_idx <- floor((best$start + best$end) / 2)
+    lambda <- sweep$lambda[mid_idx]
+    k_plateau <- c(sweep$k[best$start], sweep$k[best$end])
+  } else {
+    # Fallback to lambda.min when no non-empty plateau exists
+    lambda <- cv_fit$lambda.min
+    k_plateau <- c(NA_real_, NA_real_)
+  }
+  # Protection: relax lambda until at least min_vars variables are selected
+  idx <- which.min(abs(cv_fit$lambda - lambda))
+  while (cv_fit$nzero[idx] < min_vars && idx < length(cv_fit$lambda)) {
+    idx <- idx + 1L
+  }
+  lambda <- cv_fit$lambda[idx]
+
+  # ---- 6. Exact coefficients at the chosen lambda ---------------------------
+  # Extract the exact coefficient vector at the chosen lambda (keep intercept)
+  beta <- coef(object = gfit, x = x, y = y, s = lambda, exact = TRUE)
+
+  # ---- 7. Selective inference (lambda * n rescales glmnet's 1/n penalty) -----
+  # Selective p-values and truncated intervals at the matching standard-scale penalty
+  out <-
+    selectiveInference::fixedLassoInf(
+      x = x,
+      y = y,
+      beta = beta,
+      lambda = lambda * n,
+      alpha = alpha,
+      family = family,
+      intercept = intercept
+    )
+
+  # ---- 8. Results table on the OR scale -------------------------------------
+  # Build the OR table (two-sided + one-sided p) when anything was selected
+  if (length(out$vars) > 0) {
+    table <-
+      tibble::tibble(
+        term = names(out$vars),
+        odds_ratio = exp(out$coef0),
+        pvalue = pmin(1, 2 * out$pv),
+        pvalue_1sided = out$pv,
+        ci_lo = exp(out$ci[, 1]),
+        ci_hi = exp(out$ci[, 2])
+      ) %>%
+      dplyr::arrange(pvalue)
+    # Record the CI level so the plot can label itself
+    attr(table, "ci_level") <- 1 - alpha
+  } else {
+    # Empty table when the model selected nothing
+    table <- tibble::tibble()
+  }
+  # Number of selected variables
+  n_vars <- length(out$vars)
+
+  # ---- 9. Validity diagnostic (report only; never stop) ---------------------
+  # Flag whether every achieved tail area is within tolerance of alpha/2
+  if (n_vars > 0) {
+    tailarea_ok <- all(abs(out$tailarea - alpha / 2) <= tailarea_tol)
+  } else {
+    tailarea_ok <- NA
+  }
+  # Print pass/fail without ever halting the run
+  message(
+    "Selective-inference validity check: ",
+    if (isTRUE(tailarea_ok)) {
+      "PASSED"
+    } else if (isFALSE(tailarea_ok)) {
+      "FAILED (tailarea off target - treat CIs with caution)"
+    } else {
+      "N/A (no variables selected)"
+    }
+  )
+
+  # ---- 10. Return (elements in creation order) ------------------------------
+  # Return the sweep, chosen lambda, raw fit, table and diagnostics
+  list(
+    sweep = sweep,
+    k_plateau = k_plateau,
+    lambda = lambda,
+    fit = out,
+    table = table,
+    n_vars = n_vars,
+    variables = names(out$vars),
+    tailarea = out$tailarea,
+    tailarea_ok = tailarea_ok,
+    alpha = alpha,
+    ci_level = 1 - alpha
+  )
+}
+
+
+# ---- Method 2: bootstrap of the selective-inference LASSO -------------------
+
+#' Bootstrap the selective-inference LASSO and store the raw draws
+#'
+#' @description
+#' Resample rows with replacement `B` times; each time re-run the whole
+#' select-and-infer pipeline and store the selected variables, their log-ORs,
+#' and the native one-sided selective p. Summarising is separated
+#' ([summarize_bootstrap()]) so the expensive fits run once.
+#'
+#' @param x,y Centred design matrix and 0/1 outcome.
+#' @param B Number of bootstrap replicates.
+#' @param alpha Significance level passed to [fit_selective_lasso()].
+#' @param k Tolerance for lambda (`0` = lambda.min, `NULL` = plateau).
+#' @param elastic_net_alpha,nfolds,standardize Passed to [fit_selective_lasso()].
+#' @param seed Seed for the resampling.
+#' @param progress Print a line every 10%.
+#' @return List with `draws` (long: rep, term, log_or, si_p), `B`, `B_valid`,
+#'   `n`, `alpha`, `terms`.
+#' @importFrom tibble tibble
+#' @importFrom dplyr bind_rows
+#' @export
+bootstrap_lasso_raw <- function(
+    x,
+    y,
+    B = 1000,
+    alpha = 0.05,
+    k = 0,
+    elastic_net_alpha = 1,
+    nfolds = 10,
+    standardize = FALSE,
+    seed = 141845,
+    progress = TRUE
+) {
+  # Seed the resampling and prepare per-replicate storage
+  set.seed(seed)
+  n <- length(y)
+  draws <- vector("list", B)
+  valid <- logical(B)
+
+  # Loop over bootstrap replicates
+  for (b in seq_len(B)) {
+    # Progress ping every ~10%
+    if (progress && b %% max(1, B %/% 10) == 0) {
+      message("  bootstrap ", b, " / ", B)
+    }
+    # Draw a resample with replacement
+    idx <- sample.int(n, n, replace = TRUE)
+    xb <- x[idx, , drop = FALSE]
+    yb <- y[idx]
+    # Skip degenerate resamples with a single outcome class
+    if (length(unique(yb)) < 2) next
+
+    # Re-run the full select-and-infer pipeline (NULL seed keeps the outer stream)
+    res <- tryCatch(
+      suppressMessages(suppressWarnings(
+        fit_selective_lasso(
+          x = xb,
+          y = yb,
+          alpha = alpha,
+          k = k,
+          elastic_net_alpha = elastic_net_alpha,
+          nfolds = nfolds,
+          standardize = standardize,
+          seed = NULL
+        )
+      )),
+      error = function(e) NULL
+    )
+    # Drop the replicate entirely if the fit errored
+    if (is.null(res)) next
+    # Mark valid even when nothing was selected
+    valid[b] <- TRUE
+    if (length(res$fit$vars) == 0) next
+
+    # Store this replicate's selected variables, log-ORs and one-sided p
+    draws[[b]] <-
+      tibble::tibble(
+        rep = b,
+        term = names(res$fit$vars),
+        log_or = as.numeric(res$fit$coef0),
+        si_p = as.numeric(res$fit$pv)
+      )
+  }
+
+  # Stack all replicate draws into one long tibble
+  draws_all <- dplyr::bind_rows(draws)
+  # Report how many resamples were usable
+  message("Bootstrap complete: ", sum(valid), " / ", B, " valid resamples.")
+  # Return the draws plus book-keeping needed for summarising
+  list(
+    draws = draws_all,
+    B = B,
+    B_valid = sum(valid),
+    n = n,
+    alpha = alpha,
+    terms = sort(unique(draws_all$term))
+  )
+}
+
+
+# ---- Method 3: multi-sample splitting with cross-fitting --------------------
+
+#' Multi-sample splitting with cross-fitting (selection-corrected, on the OR scale)
+#'
+#' @description
+#' Repeatedly split the data in half, **select** variables by LASSO on one half,
+#' and **estimate + test** them by ordinary logistic regression on the other
+#' half. Because selection and inference never share rows, the per-split
+#' p-values are valid; aggregating them over many splits gives one
+#' selection-corrected p-value per variable on the familiar OR scale
+#' (Meinshausen, Meier & Buhlmann 2009, JASA). Cross-fitting uses each half for
+#' both roles, so no data is wasted.
+#'
+#' @details
+#' For every split, a variable that is not selected contributes a p-value of 1
+#' for that split. The aggregated p-value uses the fixed-`gamma` quantile rule:
+#' `P_j = min(1, quantile(p_j / gamma, gamma))`, which for `gamma = 0.5` reduces
+#' to `min(1, 2 * median(p_j))`. The OR is the median of the held-out log-OR
+#' estimates (selection bias is far milder than the conditional bootstrap,
+#' because estimation is always on unseen rows), with a percentile CI.
+#'
+#' @param x,y Centred design matrix and 0/1 outcome.
+#' @param n_splits Number of random half-splits (each contributes two
+#'   cross-fitted directions).
+#' @param gamma Quantile for p-value aggregation (`0.5` = median rule).
+#' @param nfolds CV folds for the LASSO selection step.
+#' @param elastic_net_alpha glmnet mixing (1 = lasso).
+#' @param standardize glmnet column standardisation. Keep `FALSE`.
+#' @param seed Seed for the splits.
+#' @param progress Print a line every 10%.
+#'
+#' @return Tibble of `term`, `OR`, `SE`, `ci_lo`, `ci_hi`, `pval`, `n_tested`,
+#'   `pct_tested` (share of directions in which the variable was selected).
+#' @importFrom tibble tibble
+#' @importFrom purrr map_dfr
+#' @importFrom dplyr arrange desc
+#' @export
+fit_split_lasso <- function(
+    x,
+    y,
+    n_splits = 1000,
+    gamma = 0.5,
+    nfolds = 10,
+    elastic_net_alpha = 1,
+    standardize = FALSE,
+    seed = 141845,
+    progress = TRUE
+) {
+  # Seed and cache the term names
+  set.seed(seed)
+  n <- length(y)
+  terms <- colnames(x)
+
+  # Storage: two cross-fitted directions per split (p defaults to 1 = not selected)
+  n_dir <- 2L * n_splits
+  pmat <- matrix(1, nrow = n_dir, ncol = length(terms), dimnames = list(NULL, terms))
+  bmat <- matrix(NA_real_, nrow = n_dir, ncol = length(terms),
+                 dimnames = list(NULL, terms))
+  sel_mat <- matrix(FALSE, nrow = n_dir, ncol = length(terms),
+                    dimnames = list(NULL, terms))
+
+  # Direction counter across all splits
+  d <- 0L
+  # Loop over random half-splits
+  for (s in seq_len(n_splits)) {
+    # Progress ping every ~10%
+    if (progress && s %% max(1, n_splits %/% 10) == 0) {
+      message("  split ", s, " / ", n_splits)
+    }
+    # Random half/half partition of the rows
+    idx <- sample.int(n)
+    half <- floor(n / 2)
+    part_a <- idx[seq_len(half)]
+    part_b <- idx[(half + 1):n]
+
+    # Cross-fit: (select A, test B) then (select B, test A)
+    for (dir in list(list(sel = part_a, est = part_b),
+                     list(sel = part_b, est = part_a))) {
+      # Advance the direction counter for this half
+      d <- d + 1L
+      # Outcome on each half of this direction
+      y_sel <- y[dir$sel]
+      y_est <- y[dir$est]
+      # Skip if either half is single-class (can't select or test)
+      if (length(unique(y_sel)) < 2 || length(unique(y_est)) < 2) next
+
+      # Select variables by LASSO on the selection half
+      vars <- tryCatch(
+        select_lasso_vars(
+          x = x[dir$sel, , drop = FALSE],
+          y = y_sel,
+          nfolds = nfolds,
+          elastic_net_alpha = elastic_net_alpha,
+          standardize = standardize
+        ),
+        error = function(e) character()
+      )
+      # Nothing selected -> this direction contributes only the default p = 1
+      if (length(vars) == 0) next
+
+      # Estimate + test the selected variables on the held-out half (valid)
+      est <- glm_estimate(x[dir$est, , drop = FALSE], y_est, vars)
+      # Skip if the held-out logistic fit failed
+      if (is.null(est)) next
+
+      # Record the held-out p, log-OR and selection flag for this direction
+      pmat[d, est$terms] <- est$pval
+      bmat[d, est$terms] <- est$coef
+      sel_mat[d, est$terms] <- TRUE
+    }
+  }
+
+  # Aggregate across all directions into one row per variable
+  purrr::map_dfr(terms, function(v) {
+    # Meinshausen quantile-rule aggregated p-value (gamma = 0.5 => 2 * median)
+    p_agg <- min(1, quantile(pmat[, v] / gamma, probs = gamma, names = FALSE))
+    # Held-out log-ORs from the directions where the variable was selected
+    b_sel <- bmat[sel_mat[, v], v]
+    n_tested <- sum(sel_mat[, v])
+    # Percentile CI on the OR scale (needs at least two estimates)
+    ci <- if (n_tested >= 2) {
+      exp(quantile(b_sel, c(0.025, 0.975), names = FALSE))
+    } else {
+      c(NA_real_, NA_real_)
+    }
+    # One tidy row: OR (median), SE, CI, aggregated p and selection frequency
+    tibble::tibble(
+      term = v,
+      OR = if (n_tested > 0) exp(median(b_sel)) else NA_real_,
+      SE = if (n_tested >= 2) sd(b_sel) else NA_real_,
+      ci_lo = ci[1],
+      ci_hi = ci[2],
+      pval = p_agg,
+      n_tested = n_tested,
+      pct_tested = round(100 * n_tested / n_dir, 1)
+    )
+  }) %>%
+    dplyr::arrange(dplyr::desc(pct_tested))
+}
+
+
+# ---- Method 4: Firth penalised logistic -------------------------------------
+
+#' Firth penalised logistic on a fixed predictor set (separation-robust)
+#'
+#' @description
+#' Fit `logistf::logistf()` on a given set of variables. Firth's penalty keeps
+#' estimates finite under separation and improves small-sample behaviour. NOTE:
+#' this corrects the *estimation*, not the *selection* — if `vars` came from a
+#' data-driven search, the p-values remain post-selection (naive).
+#'
+#' @param x,y Design matrix and 0/1 outcome.
+#' @param vars Variable names to fit.
+#' @return Tibble of `term`, `OR`, `SE`, `ci`, `pval`; empty if `vars` is empty.
+#' @importFrom tibble tibble
+#' @export
+fit_firth <- function(x, y, vars) {
+  # Nothing to fit if no variables were passed
+  if (length(vars) == 0) return(tibble::tibble(term = character()))
+  # Build the model frame from the selected columns and the outcome
+  df <- data.frame(.y = y, x[, vars, drop = FALSE], check.names = FALSE)
+  # Fit the Firth-penalised logistic (returns NULL on failure)
+  fit <- tryCatch(logistf::logistf(.y ~ ., data = df), error = function(e) NULL)
+  # Fall back to a bare term list if the fit failed
+  if (is.null(fit)) return(tibble::tibble(term = vars))
+  # Indices of the non-intercept coefficients
+  idx <- which(names(coef(fit)) != "(Intercept)")
+  # Return ORs, SEs, profile-penalised CIs and penalised LR p-values
+  tibble::tibble(
+    term = names(coef(fit))[idx],
+    OR = exp(coef(fit)[idx]),
+    SE = sqrt(diag(vcov(fit)))[idx],
+    ci = ci_str(exp(fit$ci.lower[idx]), exp(fit$ci.upper[idx])),
+    pval = fit$prob[idx]
+  )
+}
+
+
+# ---- Method 5: forward stepwise (native fs + logistic refit) ----------------
+
+#' Forward stepwise selective inference, plus a logistic refit for ORs
+#'
+#' @description
+#' Run forward stepwise with AIC stopping and selective inference on the LINEAR
+#' scale via [selectiveInference::fsInf()] (the package supports Gaussian only),
+#' then refit an ordinary logistic model on the selected variables to obtain
+#' interpretable odds ratios. Two views are returned: the native (valid, linear)
+#' inference and the logistic ORs (post-selection, naive).
+#'
+#' @param x,y Centred design matrix and 0/1 outcome (treated as continuous by fs).
+#' @param maxsteps Maximum forward-selection steps.
+#' @param seed Seed for the fs fit.
+#' @return List with `fsinf` (raw), `native` (linear coef/CI/selective p) and
+#'   `logistic` (OR/SE/CI/p) tibbles.
+#' @importFrom selectiveInference fs fsInf estimateSigma
+#' @importFrom tibble tibble
+#' @export
+fit_stepwise <- function(x, y, maxsteps = 2000, seed = 33) {
+  # Seed the forward-selection path
+  set.seed(seed)
+  # Run forward stepwise (linear/Gaussian) without internal normalisation
+  fsfit <-
+    selectiveInference::fs(
+      x = x,
+      y = y,
+      maxsteps = maxsteps,
+      intercept = TRUE,
+      normalize = FALSE
+    )
+  # Estimate residual sigma for the selective inference
+  sigmahat <-
+    selectiveInference::estimateSigma(
+      x = x,
+      y = y,
+      intercept = TRUE,
+      standardize = FALSE
+    )$sigmahat
+  # Selective inference at the AIC stopping point
+  fsinf <-
+    selectiveInference::fsInf(fsfit, type = "aic", sigma = sigmahat)
+
+  # Map the selected variable indices to names
+  vars <- colnames(x)[fsinf$vars]
+
+  # Native (linear-scale) view: coefficient, selective CI and selective p
+  native <-
+    tibble::tibble(
+      term = vars,
+      coef = as.numeric(fsinf$vmat %*% fsinf$y),
+      ci = ci_str(fsinf$ci[, 1], fsinf$ci[, 2]),
+      pval = fsinf$pv
+    )
+
+  # Logistic refit on the selected variables for interpretable ORs
+  est <- glm_estimate(x, y, vars)
+  # Wald CIs for the same logistic refit (NULL if the estimate failed)
+  ci <- if (!is.null(est)) stats::confint.default(glm(
+    .y ~ ., data = data.frame(.y = y, x[, vars, drop = FALSE], check.names = FALSE),
+    family = binomial()
+  )) else NULL
+  # Build the logistic OR view (or a bare term list on failure)
+  logistic <-
+    if (is.null(est)) {
+      tibble::tibble(term = vars)
+    } else {
+      tibble::tibble(
+        term = est$terms,
+        OR = exp(est$coef),
+        SE = est$se,
+        ci = ci_str(exp(ci[est$terms, 1]), exp(ci[est$terms, 2])),
+        pval = est$pval
+      )
+    }
+
+  # Return the raw object and both views
+  list(fsinf = fsinf, native = native, logistic = logistic)
+}
+
+
+# ---- Method 6: univariable logistic -----------------------------------------
+
+#' Univariable logistic regression across many predictors
+#'
+#' @description
+#' Fit one logistic model per predictor (optionally adjusted for a fixed set),
+#' with robust (sandwich) CIs, and stack the results.
+#'
+#' @param df Data frame.
+#' @param outcome Outcome column name.
+#' @param cols Predictor column names to test one at a time.
+#' @param adjust Character vector of always-included adjustors (or `NULL`).
+#' @param ci_high_cap Drop rows whose upper CI exceeds this (unstable fits).
+#' @return Tibble in the `Predictors / Odds Ratios (OR) / SE / ...` schema.
+#' @importFrom purrr map_dfr
+#' @importFrom dplyr filter arrange
+#' @export
+fit_univariable <- function(
+    df,
+    outcome,
+    cols,
+    adjust = NULL,
+    ci_high_cap = 50
+) {
+  # Adjustor prefix for the formula right-hand side (empty when unadjusted)
+  rhs_base <- if (is.null(adjust)) "" else paste(paste(adjust, collapse = " + "), "+")
+  # Fit one robust logistic model per predictor and stack the tidy rows
+  out <-
+    purrr::map_dfr(cols, function(v) {
+      # Skip a predictor that is itself an adjustor
+      if (v %in% adjust) return(tibble::tibble())
+      # Build and fit the (optionally adjusted) univariable model
+      model <- as.formula(paste(outcome, "~", rhs_base, v))
+      fit <- suppressWarnings(glm(model, data = df, family = binomial()))
+      # Robust (sandwich) covariance and exponentiated, stylised coefficients
+      robust <- sandwich::vcovHC(fit, type = "HC0")
+      lmtest::coeftest(fit, vcov. = robust) %>%
+        broom::tidy(conf.int = TRUE) %>%
+        dplyr::mutate(dplyr::across(c(estimate, conf.low, conf.high), exp)) %>%
+        dplyr::transmute(
+          Predictors = term,
+          `Odds Ratios (OR)` = round(estimate, 2),
+          SE = round(std.error, 2),
+          `Z-scores` = statistic,
+          `P-values` = round(p.value, 3),
+          `CI (low)` = round(conf.low, 2),
+          `CI (high)` = round(conf.high, 2)
+        )
+    })
+  # Drop the intercept, the adjustor rows and unstable (huge-CI) rows
+  out %>%
+    dplyr::filter(Predictors != "(Intercept)") %>%
+    dplyr::filter(is.null(adjust) | !grepl(paste(adjust, collapse = "|"), Predictors)) %>%
+    dplyr::filter(`CI (high)` < ci_high_cap) %>%
+    dplyr::arrange(`P-values`)
+}
+
+
+# ---- Method 7: p-value-screened multivariable logistic ----------------------
+
+#' Multivariable logistic from p-value-screened predictors, with robust CIs
+#'
+#' @description
+#' Screen predictors from a univariable table at `pval_threshold`, drop
+#' `unwanted`, fit one logistic model, and return sandwich-robust ORs. NOTE: the
+#' p-values are post-selection (screened on the same data), so treat them as
+#' exploratory.
+#'
+#' @param df Data frame.
+#' @param outcome Outcome column name.
+#' @param univ_tables List of univariable tibbles to screen from.
+#' @param unwanted Character vector of predictors to exclude.
+#' @param pval_threshold Screening threshold.
+#' @param drop_na_cols Columns that must be complete before fitting.
+#' @return List with `fit` (glm) and `table` (OR schema tibble).
+#' @importFrom dplyr bind_rows filter pull transmute
+#' @importFrom stringr str_replace
+#' @export
+fit_multivariable <- function(
+    df,
+    outcome,
+    univ_tables,
+    unwanted = character(),
+    pval_threshold = 0.2,
+    drop_na_cols = NULL
+) {
+  # Screen predictors below the threshold and clean off factor-level suffixes
+  predictors <-
+    dplyr::bind_rows(univ_tables) %>%
+    dplyr::filter(`P-values` < pval_threshold) %>%
+    dplyr::pull(`Predictors`) %>%
+    stringr::str_replace("^([a-z0-9_]*)([A-Z].*)$", "\\1") %>%
+    unique()
+  # Remove unwanted predictors
+  predictors <- predictors[!predictors %in% unwanted]
+
+  # Restrict to complete cases on the required columns when requested
+  if (!is.null(drop_na_cols)) df <- tidyr::drop_na(df, dplyr::all_of(drop_na_cols))
+  # Build and fit the single multivariable model
+  model <- as.formula(paste(outcome, "~", paste(predictors, collapse = " + ")))
+  fit <- glm(model, data = df, family = binomial())
+
+  # Robust (sandwich) covariance for the reported CIs
+  robust <- sandwich::vcovHC(fit, type = "HC0")
+  # Stylise the exponentiated coefficients into the shared OR schema
+  table <-
+    lmtest::coeftest(fit, vcov. = robust) %>%
+    broom::tidy(conf.int = TRUE) %>%
+    dplyr::mutate(dplyr::across(c(estimate, conf.low, conf.high), exp)) %>%
+    dplyr::filter(term != "(Intercept)") %>%
+    dplyr::transmute(
+      Predictors = term,
+      `Odds Ratios (OR)` = round(estimate, 2),
+      SE = round(std.error, 2),
+      `Z-scores` = statistic,
+      `P-values` = round(p.value, 3),
+      `CI (low)` = round(conf.low, 2),
+      `CI (high)` = round(conf.high, 2)
+    )
+  # Return the fit, the stylised table and the chosen predictors
+  list(fit = fit, table = table, predictors = predictors)
+}
+
+
+# ---- Bootstrap summary + comparison blocks ----------------------------------
+
+#' Summarise a raw bootstrap object (cheap; re-run freely)
+#'
+#' @param raw Output of [bootstrap_lasso_raw()].
+#' @param alpha Percentile-CI level.
+#' @return Tibble with conditional/unconditional OR, CIs, p-values, and the
+#'   distribution of the native one-sided selective p.
+#' @importFrom purrr map_dfr
+#' @importFrom dplyr filter arrange desc
+#' @export
+summarize_bootstrap <- function(raw, alpha = 0.05) {
+  # Denominator and percentile-CI quantiles
+  B <- raw$B_valid
+  qlo <- alpha / 2
+  qhi <- 1 - alpha / 2
+  # Two-sided percentile p, consistent with the percentile CI (no tie-split)
+  perc_p <- function(v) pmin(1, 2 * min(mean(v <= 0), mean(v >= 0)))
+  # One summarised row per variable
+  purrr::map_dfr(raw$terms, function(v) {
+    # Draws for this variable; conditional (selected only) vs zero-padded
+    d <- dplyr::filter(raw$draws, term == v)
+    lo <- d$log_or
+    nch <- length(lo)
+    loall <- c(lo, rep(0, B - nch))
+    # Conditional, unconditional and selective-p percentile summaries
+    cc <- exp(quantile(lo, c(qlo, qhi), names = FALSE))
+    uu <- exp(quantile(loall, c(qlo, qhi), names = FALSE))
+    sp <- quantile(d$si_p, c(qlo, qhi), names = FALSE, na.rm = TRUE)
+    # Assemble the row: selection frequency, ORs, CIs and p-values
+    tibble::tibble(
+      term = v,
+      n_chosen = nch,
+      pct_chosen = 100 * nch / B,
+      OR_cond = exp(median(lo)),
+      OR_uncond = exp(median(loall)),
+      SE = sd(lo),
+      ci_cond = ci_str(cc[1], cc[2]),
+      ci_uncond = ci_str(uu[1], uu[2]),
+      si_pval_median = median(d$si_p, na.rm = TRUE),
+      si_pval_int = ci_str(sp[1], sp[2]),
+      cond_pval = perc_p(lo),
+      uncond_pval = perc_p(loall)
+    )
+  }) %>%
+    dplyr::arrange(dplyr::desc(pct_chosen))
+}
+
+
+# ---- Combined-table adapters (one row per term, prefixed columns) -----------
+
+#' Selective-inference block at 95% + 90%, one-sided p (internal to the export)
+#' @keywords internal
+si_block <- function(x, y, k) {
+  # Fit at 95% (for CI + p) and at 90% (for the extra CI column)
+  f95 <- suppressMessages(fit_selective_lasso(x, y, alpha = 0.05, k = k, nfolds = 10))
+  f90 <- suppressMessages(fit_selective_lasso(x, y, alpha = 0.10, k = k, nfolds = 10))
+  # Combine into one row per term with both CI levels
+  f95$table %>%
+    dplyr::transmute(
+      term,
+      OR = odds_ratio,
+      SE = NA_real_,
+      ci95 = ci_str(ci_lo, ci_hi),
+      pval = pvalue,
+      pval_1sided = pvalue_1sided
+    ) %>%
+    dplyr::left_join(
+      f90$table %>% dplyr::transmute(term, ci90 = ci_str(ci_lo, ci_hi)),
+      by = "term"
+    )
+}
+
+#' Bootstrap block for the combined table (internal)
+#' @keywords internal
+boot_block <- function(raw, alpha = 0.05) {
+  # Denominator, quantiles and the percentile p helper
+  B <- raw$B_valid
+  qlo <- alpha / 2
+  qhi <- 1 - alpha / 2
+  perc_p <- function(v) pmin(1, 2 * min(mean(v <= 0), mean(v >= 0)))
+  # One row per variable: n_chosen/pct first, si_pval before cond/uncond
+  purrr::map_dfr(raw$terms, function(v) {
+    # Conditional draws and the zero-padded unconditional version
+    d <- dplyr::filter(raw$draws, term == v)
+    lo <- d$log_or
+    nch <- length(lo)
+    loall <- c(lo, rep(0, B - nch))
+    # Percentile CIs (conditional, unconditional, selective p)
+    cc <- exp(quantile(lo, c(qlo, qhi), names = FALSE))
+    uu <- exp(quantile(loall, c(qlo, qhi), names = FALSE))
+    sp <- quantile(d$si_p, c(qlo, qhi), names = FALSE, na.rm = TRUE)
+    # Assemble the block row
+    tibble::tibble(
+      term = v,
+      n_chosen = nch,
+      pct_chosen = 100 * nch / B,
+      OR_cond = exp(median(lo)),
+      OR_uncond = exp(median(loall)),
+      SE = sd(lo),
+      ci_cond = ci_str(cc[1], cc[2]),
+      ci_uncond = ci_str(uu[1], uu[2]),
+      si_pval_median = median(d$si_p, na.rm = TRUE),
+      si_pval_int = ci_str(sp[1], sp[2]),
+      cond_pval = perc_p(lo),
+      uncond_pval = perc_p(loall)
+    )
+  })
+}
+
+#' Split block for the combined table (combined CI into one string) (internal)
+#' @keywords internal
+split_block <- function(x, y, n_splits = 1000) {
+  # Run the split method and fold the two CI bounds into one string column
+  fit_split_lasso(x, y, n_splits = n_splits, nfolds = 10) %>%
+    dplyr::transmute(
+      term,
+      OR = OR,
+      SE = SE,
+      ci = ci_str(ci_lo, ci_hi),
+      pval = pval,
+      n_tested = n_tested,
+      pct_tested = pct_tested
+    )
+}
+
+
+# ---- The compute orchestrator (computes only, never writes) -----------------
+
+#' Compute every enabled method across all conditions (no file writing)
+#'
+#' @description
+#' Runs each enabled method end-to-end (bootstrap and stepwise included) and
+#' returns a named list of tidy tables: `combined` (the wide table, one row per
+#' condition/term with all methods side by side), one un-prefixed table per
+#' method, and `raw_all` (the bootstrap draws, kept so you can save them). It
+#' writes NOTHING — pass the result to [write_all_methods()]. Everything is
+#' driven by `methods`, so a single call is the only entry point.
+#'
+#' Collinearity note: the LASSO family (lasso, bootstrap, split, Firth) and the
+#' per-condition multivariable models run across `conditions` (curated feature
+#' subsets) because they cannot tell collinear predictors apart. Univariable and
+#' forward stepwise run once on the full set: univariable tests one predictor at
+#' a time and stepwise adds them sequentially, so neither is confused by
+#' collinearity.
+#'
+#' @param conditions Named list; each element has `x`, `y` (the collinearity
+#'   feature subsets that lasso/boot/split/firth run across).
+#' @param uni_table Univariable tibble for the `all` rows (single, full set).
+#' @param multi_by_condition Named list mapping condition -> multivariable tibble
+#'   (or `NULL`).
+#' @param step_x,step_y Design and outcome for the single forward-stepwise fit
+#'   (full set; `NULL` skips stepwise).
+#' @param methods Named logical list toggling which methods to run; missing
+#'   entries default to `TRUE`.
+#' @param nfolds,n_splits CV folds and number of random splits.
+#' @param boot_B,boot_alpha,boot_k Bootstrap replicates, CI level and lambda rule.
+#' @return Named list of tibbles (`combined` + one per enabled method) plus
+#'   `raw_all` (bootstrap draws, not written as a CSV).
+#' @importFrom purrr imap imap_dfr reduce map
+#' @importFrom dplyr bind_rows full_join mutate arrange desc
+#' @export
+compute_all_methods <- function(
+    conditions,
+    uni_table = NULL,
+    multi_by_condition = list(),
+    step_x = NULL,
+    step_y = NULL,
+    methods = NULL,
+    nfolds = 10,
+    n_splits = 1000,
+    boot_B = 1000,
+    boot_alpha = 0.05,
+    boot_k = 0
+) {
+
+  # ---- Resolve toggles (any missing entry defaults to TRUE) -----------------
+  # Merge the caller's toggles over an all-TRUE default
+  m <- utils::modifyList(
+    list(
+      selective_lasso = TRUE,
+      bootstrap = TRUE,
+      split = TRUE,
+      firth = TRUE,
+      stepwise = TRUE,
+      univariable = TRUE,
+      multivariable = TRUE
+    ),
+    if (is.null(methods)) list() else methods
+  )
+
+  # ---- Run the slow precomputations INSIDE, gated by the toggles ------------
+  # Bootstrap once per condition (kept in the result so it can be saved to disk)
+  raw_all <- NULL
+  if (m$bootstrap) {
+    raw_all <-
+      purrr::imap(conditions, function(cond, name) {
+        message("=== bootstrap: ", name, " ===")
+        bootstrap_lasso_raw(
+          cond$x, cond$y,
+          B = boot_B, k = boot_k, nfolds = nfolds, alpha = boot_alpha
+        )
+      })
+  }
+  # Forward stepwise once on the full set (skipped when no design is supplied)
+  step_fit <- NULL
+  if (m$stepwise && !is.null(step_x) && !is.null(step_y)) {
+    step_fit <- fit_stepwise(step_x, step_y)
+  }
+
+  # ---- Compute every enabled block once, per condition (un-prefixed) --------
+  # Each condition yields a named list of method blocks (computed a single time)
+  per_cond_blocks <-
+    purrr::imap(conditions, function(cond, name) {
+      # LASSO selection feeds both lasso_opt AND firth's variable set
+      lopt <- if (m$selective_lasso || m$firth) {
+        si_block(cond$x, cond$y, k = NULL)
+      } else {
+        NULL
+      }
+      # Accumulate the enabled blocks for this condition
+      b <- list()
+      # Bootstrap block (summarises the draws computed above)
+      if (m$bootstrap) {
+        b$boot_lasso <- boot_block(raw_all[[name]], alpha = boot_alpha)
+      }
+      # Selective inference at the optimal and the min lambda
+      if (m$selective_lasso) {
+        b$lasso_opt <- lopt
+        b$lasso_min <- si_block(cond$x, cond$y, k = 0)
+      }
+      # Split (multi-sample splitting) block
+      if (m$split) {
+        b$split <- split_block(cond$x, cond$y, n_splits = n_splits)
+      }
+      # Firth block on the LASSO-selected set
+      if (m$firth) {
+        vars_opt <- if (is.null(lopt)) character() else lopt$term
+        b$firth <- fit_firth(cond$x, cond$y, vars_opt)
+      }
+      # Multivariable block when a model is mapped for this condition
+      if (m$multivariable && !is.null(multi_by_condition[[name]])) {
+        b$multi <- norm_orlike(multi_by_condition[[name]])
+      }
+      b
+    })
+
+  # ---- Combined table: prefix each block, join by term, stack ---------------
+  # One wide row per (condition, term) with every method's columns side by side
+  combined <-
+    purrr::imap_dfr(per_cond_blocks, function(b, name) {
+      # Empty stub when every method was switched off for this condition
+      if (length(b) == 0) {
+        return(tibble::tibble(term = character(), condition = name))
+      }
+      # Prefix each block with its method name, then full-join on term
+      prefixed <- purrr::imap(b, function(tbl, pre) prefix_cols(tbl, pre))
+      purrr::reduce(prefixed, dplyr::full_join, by = "term") %>%
+        dplyr::mutate(condition = name, .before = 1)
+    })
+
+  # ---- Attach uni + step (logistic) + fs (native) to the "all" rows ---------
+  # Collect the condition-agnostic blocks that belong only on the "all" rows
+  extra_blocks <- list()
+  # Univariable block
+  if (m$univariable && !is.null(uni_table)) {
+    extra_blocks$uni <- norm_orlike(uni_table)
+  }
+  # Stepwise: logistic ORs and the native linear-scale selective inference
+  if (m$stepwise && !is.null(step_fit)) {
+    extra_blocks$step <- step_fit$logistic
+    extra_blocks$fs <- step_fit$native
+  }
+  # Prefix, join and merge the extras onto the "all" rows when any exist
+  if (length(extra_blocks) > 0) {
+    extra_all <-
+      purrr::imap(extra_blocks, function(tbl, pre) prefix_cols(tbl, pre)) %>%
+      purrr::reduce(dplyr::full_join, by = "term") %>%
+      dplyr::mutate(condition = "all")
+    combined <- dplyr::full_join(combined, extra_all, by = c("condition", "term"))
+  }
+
+  # ---- Sort by selection frequency when the bootstrap ran -------------------
+  # Order by bootstrap selection frequency if present, else by term
+  if ("boot_lasso_pct_chosen" %in% names(combined)) {
+    combined <-
+      dplyr::arrange(combined, condition, dplyr::desc(boot_lasso_pct_chosen))
+  } else {
+    combined <- dplyr::arrange(combined, condition, term)
+  }
+
+  # ---- Per-method stacked tables (un-prefixed, from the same blocks) --------
+  # Stack a given method's block across conditions, tagging the condition
+  stack_method <- function(key) {
+    purrr::imap_dfr(per_cond_blocks, function(b, name) {
+      if (is.null(b[[key]])) return(NULL)
+      b[[key]] %>% dplyr::mutate(condition = name, .before = 1)
+    })
+  }
+  # Assemble the return list: combined first, then each non-empty method table
+  results <- list(combined = combined)
+  for (key in c("lasso_opt", "lasso_min", "boot_lasso", "split", "firth")) {
+    tbl <- stack_method(key)
+    if (nrow(tbl) > 0) results[[key]] <- tbl
+  }
+  # Stepwise tables are condition-agnostic, so add them directly
+  if (m$stepwise && !is.null(step_fit)) {
+    results$step <- step_fit$logistic
+    results$fs <- step_fit$native
+  }
+  # Keep the bootstrap draws so the caller can saveRDS() them (not a CSV)
+  if (!is.null(raw_all)) results$raw_all <- raw_all
+  # Return the named list of tables (nothing written)
+  results
+}
+
+
+# ---- The write section (exports only, computes nothing) ---------------------
+
+#' Write a computed-results list to per-method and combined CSVs
+#'
+#' @description
+#' Takes the list returned by [compute_all_methods()] and writes each element to
+#' its CSV (rounded for readability). Export only — no computation happens here.
+#'
+#' @param results Named list from [compute_all_methods()].
+#' @param csv_folder Directory to write into.
+#' @return `results`, invisibly.
+#' @importFrom readr write_csv
+#' @export
+write_all_methods <- function(results, csv_folder) {
+  # Map each result element to its output file name
+  file_map <- list(
+    combined = "results_combined_all_methods.csv",
+    lasso_opt = "results_lasso_optimal.csv",
+    lasso_min = "results_lasso_min.csv",
+    boot_lasso = "results_bootstrap.csv",
+    split = "results_split.csv",
+    firth = "results_firth.csv",
+    step = "results_stepwise_logistic.csv",
+    fs = "results_fs_native_linear.csv"
+  )
+  # Round and write each element that has a mapped file name
+  for (key in names(results)) {
+    fname <- file_map[[key]]
+    if (is.null(fname)) next
+    readr::write_csv(round_readable(results[[key]]), file.path(csv_folder, fname))
+  }
+  # Return the input invisibly for piping
+  invisible(results)
+}
+```
+
+
+## Run
+
+```{r}
+# Only compute what's switched on
+step_fit <-
+  if (METHODS$stepwise) {
+    fit_stepwise(X_without_gradings_centered, y_without_gradings)
+  } else NULL
+
+raw_all <-
+  if (METHODS$bootstrap) {
+    purrr::imap(conditions, function(cond, name) {
+      message("=== bootstrap: ", name, " ===")
+      bootstrap_lasso_raw(cond$x, cond$y, B = 1000, nfolds = 10)
+    })
+  } else NULL
+
+# One call: runs the enabled methods, writes every CSV
+combined <- run_all_methods(
+  conditions         = conditions,
+  raw_all            = raw_all,
+  uni_table          = univariable_unadjusted_recoded,
+  multi_by_condition = MULTI_BY_CONDITION,
+  step_fit           = step_fit,
+  csv_folder         = csv_folder,
+  methods            = METHODS,
+  nfolds             = 10,
+  n_splits           = 1000,
+  boot_alpha         = 0.05
+)
+```
+
+
+## Write
+
+```{r}
+
+```
+
+
+
+```{r}
+# =============================================================================
+# Modeling methods library
+# -----------------------------------------------------------------------------
+# Every modeling method is defined here as a single documented function, and a
+# lone orchestrator (`run_all_methods()`) applies them to a set of conditions
+# and writes the per-method and combined CSVs.
+#
+# Methods and their column prefixes in the combined table:
+#   * lasso_opt_ / lasso_min_  selective-inference LASSO (fit_selective_lasso)
+#   * boot_lasso_              bootstrap of the selective-inference LASSO
+#   * split_                   multi-sample splitting with cross-fitting
+#   * firth_                   Firth penalised logistic on the selected set
+#   * step_ / fs_             forward stepwise (logistic refit / native linear)
+#   * multi_                  p-value-screened multivariable logistic
+#   * uni_                    univariable logistic
+#
+# Reading guide for the tricky parts:
+#   - Selective inference: `fit_selective_lasso()` corrects p-values/CIs for the
+#     fact that the LASSO chose the variables. Its comments explain the lambda
+#     scaling, the standardisation choice, and the stable-plateau rule.
+#   - Split (`fit_split_lasso()`): the only method whose p-values are BOTH
+#     selection-corrected AND on a scale a clinician reads directly, because it
+#     selects on one half of the data and tests on the other (never the same
+#     rows), then aggregates over many random splits (Meinshausen, Meier &
+#     Buhlmann 2009). Cross-fitting uses each half for both roles.
+# =============================================================================
+
+
+# ---- Formatting helpers -----------------------------------------------------
+
+#' Combine two bounds into one readable "lo - hi" string
+#'
+#' @param lo,hi Numeric vectors of lower and upper bounds.
+#' @param digits Significant digits.
+#' @return Character vector; `NA` where either bound is `NA`.
+#' @export
+ci_str <- function(lo, hi, digits = 3) {
+  ifelse(
+    is.na(lo) | is.na(hi),
+    NA_character_,
+    paste0(signif(lo, digits), " - ", signif(hi, digits))
+  )
+}
+
+
+#' Prefix every non-`term` column of a block
+#'
+#' @param df A tibble with a `term` column.
+#' @param pre Prefix string (e.g. `"lasso_opt"`).
+#' @return `df` with columns renamed `<pre>_<col>`.
+#' @export
+prefix_cols <- function(df, pre) {
+  dplyr::rename_with(df, ~ paste0(pre, "_", .x), -term)
+}
+
+
+#' Round all numeric columns to a readable number of significant digits
+#'
+#' @param df A tibble.
+#' @param digits Significant digits (keeps small p-values legible).
+#' @return `df` with numeric columns passed through `signif()`.
+#' @export
+round_readable <- function(df, digits = 3) {
+  dplyr::mutate(df, dplyr::across(dplyr::where(is.numeric), ~ signif(.x, digits)))
+}
+
+
+#' Turn raw model.matrix term names into readable labels
+#'
+#' @param old_terms Character vector of raw term names.
+#' @param col_names Named lookup vector (name = label, value = variable).
+#' @return Character vector of labels; unmatched terms fall back to the raw name.
+#' @importFrom stringr str_extract str_replace
+#' @importFrom purrr map_chr
+#' @export
+prettify_terms <- function(old_terms, col_names) {
+  factor_terms <- stringr::str_extract(old_terms, "[A-Z].*")
+  base_terms <- stringr::str_replace(old_terms, "[A-Z].*$", "")
+  new_terms <-
+    purrr::map_chr(base_terms, function(bt) {
+      label <- names(col_names)[col_names == bt]
+      if (length(label) == 0) bt else label[1]
+    })
+  ifelse(
+    is.na(factor_terms),
+    new_terms,
+    paste(new_terms, factor_terms, sep = " - ")
+  )
+}
+
+
+#' Normalise a glm/broom style OR table to the common schema
+#'
+#' @param tbl Tibble with columns `Predictors`, `Odds Ratios (OR)`, `SE`,
+#'   `CI (low)`, `CI (high)`, `P-values` (the univariable/multivariable format).
+#' @return Tibble of `term`, `OR`, `SE`, `ci`, `pval`.
+#' @export
+norm_orlike <- function(tbl) {
+  tbl %>%
+    dplyr::transmute(
+      term = .data[["Predictors"]],
+      OR = .data[["Odds Ratios (OR)"]],
+      SE = .data[["SE"]],
+      ci = ci_str(.data[["CI (low)"]], .data[["CI (high)"]]),
+      pval = .data[["P-values"]]
+    )
+}
+
+
+# ---- Internal fitters (small, shared building blocks) -----------------------
+
+#' Select variables by LASSO at lambda.min (internal)
+#'
+#' @param x Centred design matrix.
+#' @param y 0/1 outcome.
+#' @param nfolds CV folds.
+#' @param elastic_net_alpha glmnet mixing (1 = lasso).
+#' @param standardize glmnet column standardisation.
+#' @return Character vector of selected variable names (no intercept).
+#' @keywords internal
+select_lasso_vars <- function(
+    x,
+    y,
+    nfolds = 10,
+    elastic_net_alpha = 1,
+    standardize = FALSE
+) {
+  cv <-
+    glmnet::cv.glmnet(
+      x = x,
+      y = y,
+      family = "binomial",
+      alpha = elastic_net_alpha,
+      nfolds = nfolds,
+      standardize = standardize
+    )
+  b <- as.matrix(coef(cv, s = "lambda.min"))
+  setdiff(rownames(b)[b[, 1] != 0], "(Intercept)")
+}
+
+
+#' Logistic estimate + Wald p-values on a fixed variable set (internal)
+#'
+#' @param x Design matrix.
+#' @param y 0/1 outcome.
+#' @param vars Variable names to include.
+#' @return List of `terms`, `coef` (log-OR), `se`, `pval`; `NULL` on failure.
+#' @keywords internal
+glm_estimate <- function(x, y, vars) {
+  if (length(vars) == 0) return(NULL)
+  df <- data.frame(.y = y, x[, vars, drop = FALSE], check.names = FALSE)
+  fit <- tryCatch(
+    suppressWarnings(glm(.y ~ ., data = df, family = binomial())),
+    error = function(e) NULL
+  )
+  if (is.null(fit)) return(NULL)
+  co <- summary(fit)$coefficients
+  keep <- setdiff(rownames(co), "(Intercept)")
+  if (length(keep) == 0) return(NULL)
+  list(
+    terms = keep,
+    coef = co[keep, "Estimate"],
+    se = co[keep, "Std. Error"],
+    pval = co[keep, "Pr(>|z|)"]
+  )
+}
+
+
+# ---- Method 1: selective-inference LASSO ------------------------------------
+
+#' Selective-inference LASSO for a binary outcome
+#'
+#' @description
+#' Fit an L1-penalised logistic regression, choose a regularisation-stable model
+#' (or a user-specified one), and return post-selection (selective) p-values and
+#' confidence intervals via [selectiveInference::fixedLassoInf()]. This is the
+#' method that formally corrects the inference for the model-selection step.
+#'
+#' @details
+#' Design decisions baked in from debugging on small, separation-prone data:
+#'
+#' * **Centred, unscaled `x`.** Scaling the columns (equivalently
+#'   `glmnet(standardize = TRUE)`) pushed the observed statistics onto the
+#'   boundary of the truncation region and produced infinite intervals.
+#' * **`standardize = FALSE`**, so glmnet penalises exactly the design handed to
+#'   `fixedLassoInf` with a uniform penalty.
+#' * **`lambda * n`.** `fixedLassoInf` uses the standard lasso objective while
+#'   glmnet scales the loss by `1/n`; `beta` is read at glmnet's `lambda`, so the
+#'   matching penalty is `lambda * n` (otherwise the KKT check fails).
+#' * **Fixed folds** via an explicit `foldid` for reproducibility.
+#' * **Stable-plateau selection.** A fractional-SE sweep generalises the 1-SE
+#'   rule; with `k = NULL` the function takes the longest run of tolerances that
+#'   select an identical variable set. `k = 0` reproduces `lambda.min`, `k = 1`
+#'   reproduces `lambda.1se`. This is a pre-specified rule, not tuned to results.
+#'
+#' The reported `pvalue` is the two-sided (doubled) selective p; `pvalue_1sided`
+#' is the package-native one-sided p (one-sided because the LASSO already fixed
+#' the sign, so the test conditions on that direction).
+#'
+#' @param x Numeric design matrix (`n` x `p`), PRE-CENTRED, NOT column-scaled.
+#' @param y Numeric 0/1 outcome of length `n`.
+#' @param family glmnet family; validated for `"binomial"`.
+#' @param elastic_net_alpha glmnet mixing (1 = lasso, 0 = ridge).
+#' @param nfolds Cross-validation folds.
+#' @param k_grid Fractional-SE tolerances to sweep in `[0, 1]`.
+#' @param k Optional single tolerance; overrides the plateau search.
+#' @param alpha Significance level: CI is `100(1-alpha)%`, two-sided p vs `alpha`.
+#' @param intercept Fit an intercept (must be `TRUE` for binomial).
+#' @param standardize glmnet column standardisation. Keep `FALSE`.
+#' @param seed Seed for folds; pass `NULL` inside resampling loops so the outer
+#'   RNG stream is not reset.
+#' @param min_vars Minimum model size (never a zero-variable model).
+#' @param tailarea_tol Tolerance for the `tailarea_ok` validity flag.
+#'
+#' @return A list with `sweep`, `k_plateau`, `lambda`, `fit`, `table`, `n_vars`,
+#'   `variables`, `tailarea`, `tailarea_ok`, `alpha`, `ci_level`.
+#' @importFrom glmnet cv.glmnet glmnet
+#' @importFrom selectiveInference fixedLassoInf
+#' @importFrom purrr map_dfr
+#' @importFrom tibble tibble
+#' @importFrom dplyr filter arrange desc
+#' @export
+fit_selective_lasso <- function(
+    x,
+    y,
+    family = "binomial",
+    elastic_net_alpha = 1,
+    nfolds = 10,
+    k_grid = seq(0, 1, 0.05),
+    k = NULL,
+    alpha = 0.05,
+    intercept = TRUE,
+    standardize = FALSE,
+    seed = 141845,
+    min_vars = 1,
+    tailarea_tol = 0.01
+) {
+
+  # ---- 0. Setup + reproducible folds (NULL seed = don't reset the stream) ---
+  if (!is.null(seed)) set.seed(seed)
+  n <- length(y)
+  foldid <- sample(rep(seq_len(nfolds), length.out = n))
+
+  # ---- 1. Cross-validation: lambda path + CV-error curve --------------------
+  cv_fit <-
+    glmnet::cv.glmnet(
+      x = x,
+      y = y,
+      family = family,
+      alpha = elastic_net_alpha,
+      foldid = foldid,
+      standardize = standardize
+    )
+
+  # ---- 2. Full-path fit: single, clean source for coefficient reads ---------
+  gfit <-
+    glmnet::glmnet(
+      x = x,
+      y = y,
+      family = family,
+      alpha = elastic_net_alpha,
+      intercept = intercept,
+      standardize = standardize
+    )
+
+  # ---- 3. Fractional-SE sweep: record the selected set at each tolerance -----
+  #        lambda_k = largest lambda whose CV error is within k*SE of the min.
+  imin <- which.min(cv_fit$cvm)
+  sweep <-
+    purrr::map_dfr(k_grid, function(k) {
+      thr <- cv_fit$cvm[imin] + k * cv_fit$cvsd[imin]
+      lam <- max(cv_fit$lambda[cv_fit$cvm <= thr])
+      b <- as.matrix(coef(gfit, s = lam))
+      vars <- setdiff(rownames(b)[b[, 1] != 0], "(Intercept)")
+      tibble::tibble(
+        k = k,
+        lambda = lam,
+        n_vars = length(vars),
+        var_key = paste(sort(vars), collapse = "|")
+      )
+    })
+
+  # ---- 4. Most stable non-empty plateau (used only when k is NULL) ----------
+  #        Plateau = consecutive k with an identical set; prefer the longest,
+  #        tie-break toward more regularisation.
+  runs <- rle(sweep$var_key)
+  ends <- cumsum(runs$lengths)
+  starts <- ends - runs$lengths + 1L
+  plateaus <-
+    tibble::tibble(
+      var_key = runs$values,
+      len = runs$lengths,
+      start = starts,
+      end = ends,
+      n_vars = sweep$n_vars[starts]
+    ) %>%
+    dplyr::filter(n_vars >= min_vars) %>%
+    dplyr::arrange(dplyr::desc(len), dplyr::desc(start))
+
+  # ---- 5. Choose lambda: user k, else plateau centre, else lambda.min -------
+  if (!is.null(k)) {
+    thr <- cv_fit$cvm[imin] + k * cv_fit$cvsd[imin]
+    lambda <- max(cv_fit$lambda[cv_fit$cvm <= thr])
+    k_plateau <- c(k, k)
+  } else if (nrow(plateaus) > 0) {
+    best <- plateaus[1, ]
+    mid_idx <- floor((best$start + best$end) / 2)
+    lambda <- sweep$lambda[mid_idx]
+    k_plateau <- c(sweep$k[best$start], sweep$k[best$end])
+  } else {
+    lambda <- cv_fit$lambda.min
+    k_plateau <- c(NA_real_, NA_real_)
+  }
+  # Protection: relax until at least min_vars are selected
+  idx <- which.min(abs(cv_fit$lambda - lambda))
+  while (cv_fit$nzero[idx] < min_vars && idx < length(cv_fit$lambda)) {
+    idx <- idx + 1L
+  }
+  lambda <- cv_fit$lambda[idx]
+
+  # ---- 6. Exact coefficients at the chosen lambda ---------------------------
+  beta <- coef(object = gfit, x = x, y = y, s = lambda, exact = TRUE)
+
+  # ---- 7. Selective inference (lambda * n rescales glmnet's 1/n penalty) -----
+  out <-
+    selectiveInference::fixedLassoInf(
+      x = x,
+      y = y,
+      beta = beta,
+      lambda = lambda * n,
+      alpha = alpha,
+      family = family,
+      intercept = intercept
+    )
+
+  # ---- 8. Results table on the OR scale -------------------------------------
+  if (length(out$vars) > 0) {
+    table <-
+      tibble::tibble(
+        term = names(out$vars),
+        odds_ratio = exp(out$coef0),
+        pvalue = pmin(1, 2 * out$pv),   # two-sided (doubled) for reporting
+        pvalue_1sided = out$pv,         # native one-sided selective p
+        ci_lo = exp(out$ci[, 1]),
+        ci_hi = exp(out$ci[, 2])
+      ) %>%
+      dplyr::arrange(pvalue)
+    attr(table, "ci_level") <- 1 - alpha
+  } else {
+    table <- tibble::tibble()
+  }
+  n_vars <- length(out$vars)
+
+  # ---- 9. Validity diagnostic (report only; never stop) ---------------------
+  if (n_vars > 0) {
+    tailarea_ok <- all(abs(out$tailarea - alpha / 2) <= tailarea_tol)
+  } else {
+    tailarea_ok <- NA
+  }
+  message(
+    "Selective-inference validity check: ",
+    if (isTRUE(tailarea_ok)) {
+      "PASSED"
+    } else if (isFALSE(tailarea_ok)) {
+      "FAILED (tailarea off target - treat CIs with caution)"
+    } else {
+      "N/A (no variables selected)"
+    }
+  )
+
+  # ---- 10. Return (elements in creation order) ------------------------------
+  list(
+    sweep = sweep,
+    k_plateau = k_plateau,
+    lambda = lambda,
+    fit = out,
+    table = table,
+    n_vars = n_vars,
+    variables = names(out$vars),
+    tailarea = out$tailarea,
+    tailarea_ok = tailarea_ok,
+    alpha = alpha,
+    ci_level = 1 - alpha
+  )
+}
+
+
+# ---- Method 2: bootstrap of the selective-inference LASSO -------------------
+
+#' Bootstrap the selective-inference LASSO and store the raw draws
+#'
+#' @description
+#' Resample rows with replacement `B` times; each time re-run the whole
+#' select-and-infer pipeline and store the selected variables, their log-ORs,
+#' and the native one-sided selective p. Summarising is separated
+#' ([summarize_bootstrap()]) so the expensive fits run once.
+#'
+#' @param x,y Centred design matrix and 0/1 outcome.
+#' @param B Number of bootstrap replicates.
+#' @param alpha Significance level passed to [fit_selective_lasso()].
+#' @param k Tolerance for lambda (`0` = lambda.min, `NULL` = plateau).
+#' @param elastic_net_alpha,nfolds,standardize Passed to [fit_selective_lasso()].
+#' @param seed Seed for the resampling.
+#' @param progress Print a line every 10%.
+#' @return List with `draws` (long: rep, term, log_or, si_p), `B`, `B_valid`,
+#'   `n`, `alpha`, `terms`.
+#' @importFrom tibble tibble
+#' @importFrom dplyr bind_rows
+#' @export
+bootstrap_lasso_raw <- function(
+    x,
+    y,
+    B = 1000,
+    alpha = 0.05,
+    k = 0,
+    elastic_net_alpha = 1,
+    nfolds = 10,
+    standardize = FALSE,
+    seed = 141845,
+    progress = TRUE
+) {
+  set.seed(seed)
+  n <- length(y)
+  draws <- vector("list", B)
+  valid <- logical(B)
+
+  for (b in seq_len(B)) {
+    if (progress && b %% max(1, B %/% 10) == 0) {
+      message("  bootstrap ", b, " / ", B)
+    }
+    idx <- sample.int(n, n, replace = TRUE)
+    xb <- x[idx, , drop = FALSE]
+    yb <- y[idx]
+    if (length(unique(yb)) < 2) next
+
+    res <- tryCatch(
+      suppressMessages(suppressWarnings(
+        fit_selective_lasso(
+          x = xb,
+          y = yb,
+          alpha = alpha,
+          k = k,
+          elastic_net_alpha = elastic_net_alpha,
+          nfolds = nfolds,
+          standardize = standardize,
+          seed = NULL
+        )
+      )),
+      error = function(e) NULL
+    )
+    if (is.null(res)) next
+    valid[b] <- TRUE
+    if (length(res$fit$vars) == 0) next
+
+    draws[[b]] <-
+      tibble::tibble(
+        rep = b,
+        term = names(res$fit$vars),
+        log_or = as.numeric(res$fit$coef0),
+        si_p = as.numeric(res$fit$pv)   # native one-sided selective p
+      )
+  }
+
+  draws_all <- dplyr::bind_rows(draws)
+  message("Bootstrap complete: ", sum(valid), " / ", B, " valid resamples.")
+  list(
+    draws = draws_all,
+    B = B,
+    B_valid = sum(valid),
+    n = n,
+    alpha = alpha,
+    terms = sort(unique(draws_all$term))
+  )
+}
+
+
+# ---- Method 3: multi-sample splitting with cross-fitting --------------------
+
+#' Multi-sample splitting with cross-fitting (selection-corrected, on the OR scale)
+#'
+#' @description
+#' Repeatedly split the data in half, **select** variables by LASSO on one half,
+#' and **estimate + test** them by ordinary logistic regression on the other
+#' half. Because selection and inference never share rows, the per-split
+#' p-values are valid; aggregating them over many splits gives one
+#' selection-corrected p-value per variable on the familiar OR scale
+#' (Meinshausen, Meier & Buhlmann 2009, JASA). Cross-fitting uses each half for
+#' both roles, so no data is wasted.
+#'
+#' @details
+#' For every split, a variable that is not selected contributes a p-value of 1
+#' for that split. The aggregated p-value uses the fixed-`gamma` quantile rule:
+#' `P_j = min(1, quantile(p_j / gamma, gamma))`, which for `gamma = 0.5` reduces
+#' to `min(1, 2 * median(p_j))`. The OR is the median of the held-out log-OR
+#' estimates (selection bias is far milder than the conditional bootstrap,
+#' because estimation is always on unseen rows), with a percentile CI.
+#'
+#' @param x,y Centred design matrix and 0/1 outcome.
+#' @param n_splits Number of random half-splits (each contributes two
+#'   cross-fitted directions).
+#' @param gamma Quantile for p-value aggregation (`0.5` = median rule).
+#' @param nfolds CV folds for the LASSO selection step.
+#' @param elastic_net_alpha glmnet mixing (1 = lasso).
+#' @param standardize glmnet column standardisation. Keep `FALSE`.
+#' @param seed Seed for the splits.
+#' @param progress Print a line every 10%.
+#'
+#' @return Tibble of `term`, `OR`, `SE`, `ci_lo`, `ci_hi`, `pval`, `n_tested`,
+#'   `pct_tested` (share of directions in which the variable was selected).
+#' @importFrom tibble tibble
+#' @importFrom purrr map_dfr
+#' @importFrom dplyr arrange desc
+#' @export
+fit_split_lasso <- function(
+    x,
+    y,
+    n_splits = 1000,
+    gamma = 0.5,
+    nfolds = 10,
+    elastic_net_alpha = 1,
+    standardize = FALSE,
+    seed = 141845,
+    progress = TRUE
+) {
+  set.seed(seed)
+  n <- length(y)
+  terms <- colnames(x)
+
+  # Per direction (2 per split): held-out p (1 if not selected) and log-OR.
+  n_dir <- 2L * n_splits
+  pmat <- matrix(1, nrow = n_dir, ncol = length(terms), dimnames = list(NULL, terms))
+  bmat <- matrix(NA_real_, nrow = n_dir, ncol = length(terms),
+                 dimnames = list(NULL, terms))
+  sel_mat <- matrix(FALSE, nrow = n_dir, ncol = length(terms),
+                    dimnames = list(NULL, terms))
+
+  d <- 0L
+  for (s in seq_len(n_splits)) {
+    if (progress && s %% max(1, n_splits %/% 10) == 0) {
+      message("  split ", s, " / ", n_splits)
+    }
+    idx <- sample.int(n)
+    half <- floor(n / 2)
+    part_a <- idx[seq_len(half)]
+    part_b <- idx[(half + 1):n]
+
+    # Two cross-fitted directions: (select A, test B) and (select B, test A)
+    for (dir in list(list(sel = part_a, est = part_b),
+                     list(sel = part_b, est = part_a))) {
+      d <- d + 1L
+      y_sel <- y[dir$sel]
+      y_est <- y[dir$est]
+      if (length(unique(y_sel)) < 2 || length(unique(y_est)) < 2) next
+
+      vars <- tryCatch(
+        select_lasso_vars(
+          x = x[dir$sel, , drop = FALSE],
+          y = y_sel,
+          nfolds = nfolds,
+          elastic_net_alpha = elastic_net_alpha,
+          standardize = standardize
+        ),
+        error = function(e) character()
+      )
+      if (length(vars) == 0) next
+
+      est <- glm_estimate(x[dir$est, , drop = FALSE], y_est, vars)
+      if (is.null(est)) next
+
+      pmat[d, est$terms] <- est$pval
+      bmat[d, est$terms] <- est$coef
+      sel_mat[d, est$terms] <- TRUE
+    }
+  }
+
+  # Aggregate across directions
+  purrr::map_dfr(terms, function(v) {
+    p_agg <- min(1, quantile(pmat[, v] / gamma, probs = gamma, names = FALSE))
+    b_sel <- bmat[sel_mat[, v], v]
+    n_tested <- sum(sel_mat[, v])
+    ci <- if (n_tested >= 2) {
+      exp(quantile(b_sel, c(0.025, 0.975), names = FALSE))
+    } else {
+      c(NA_real_, NA_real_)
+    }
+    tibble::tibble(
+      term = v,
+      OR = if (n_tested > 0) exp(median(b_sel)) else NA_real_,
+      SE = if (n_tested >= 2) sd(b_sel) else NA_real_,
+      ci_lo = ci[1],
+      ci_hi = ci[2],
+      pval = p_agg,
+      n_tested = n_tested,
+      pct_tested = round(100 * n_tested / n_dir, 1)
+    )
+  }) %>%
+    dplyr::arrange(dplyr::desc(pct_tested))
+}
+
+
+# ---- Method 4: Firth penalised logistic -------------------------------------
+
+#' Firth penalised logistic on a fixed predictor set (separation-robust)
+#'
+#' @description
+#' Fit `logistf::logistf()` on a given set of variables. Firth's penalty keeps
+#' estimates finite under separation and improves small-sample behaviour. NOTE:
+#' this corrects the *estimation*, not the *selection* — if `vars` came from a
+#' data-driven search, the p-values remain post-selection (naive).
+#'
+#' @param x,y Design matrix and 0/1 outcome.
+#' @param vars Variable names to fit.
+#' @return Tibble of `term`, `OR`, `SE`, `ci`, `pval`; empty if `vars` is empty.
+#' @importFrom tibble tibble
+#' @export
+fit_firth <- function(x, y, vars) {
+  if (length(vars) == 0) return(tibble::tibble(term = character()))
+  df <- data.frame(.y = y, x[, vars, drop = FALSE], check.names = FALSE)
+  fit <- tryCatch(logistf::logistf(.y ~ ., data = df), error = function(e) NULL)
+  if (is.null(fit)) return(tibble::tibble(term = vars))
+  idx <- which(names(coef(fit)) != "(Intercept)")
+  tibble::tibble(
+    term = names(coef(fit))[idx],
+    OR = exp(coef(fit)[idx]),
+    SE = sqrt(diag(vcov(fit)))[idx],
+    ci = ci_str(exp(fit$ci.lower[idx]), exp(fit$ci.upper[idx])),
+    pval = fit$prob[idx]
+  )
+}
+
+
+# ---- Method 5: forward stepwise (native fs + logistic refit) ----------------
+
+#' Forward stepwise selective inference, plus a logistic refit for ORs
+#'
+#' @description
+#' Run forward stepwise with AIC stopping and selective inference on the LINEAR
+#' scale via [selectiveInference::fsInf()] (the package supports Gaussian only),
+#' then refit an ordinary logistic model on the selected variables to obtain
+#' interpretable odds ratios. Two views are returned: the native (valid, linear)
+#' inference and the logistic ORs (post-selection, naive).
+#'
+#' @param x,y Centred design matrix and 0/1 outcome (treated as continuous by fs).
+#' @param maxsteps Maximum forward-selection steps.
+#' @param seed Seed for the fs fit.
+#' @return List with `fsinf` (raw), `native` (linear coef/CI/selective p) and
+#'   `logistic` (OR/SE/CI/p) tibbles.
+#' @importFrom selectiveInference fs fsInf estimateSigma
+#' @importFrom tibble tibble
+#' @export
+fit_stepwise <- function(x, y, maxsteps = 2000, seed = 33) {
+  set.seed(seed)
+  fsfit <-
+    selectiveInference::fs(
+      x = x,
+      y = y,
+      maxsteps = maxsteps,
+      intercept = TRUE,
+      normalize = FALSE
+    )
+  sigmahat <-
+    selectiveInference::estimateSigma(
+      x = x,
+      y = y,
+      intercept = TRUE,
+      standardize = FALSE
+    )$sigmahat
+  fsinf <-
+    selectiveInference::fsInf(fsfit, type = "aic", sigma = sigmahat)
+
+  vars <- colnames(x)[fsinf$vars]
+
+  native <-
+    tibble::tibble(
+      term = vars,
+      coef = as.numeric(fsinf$vmat %*% fsinf$y),   # linear scale, NOT an OR
+      ci = ci_str(fsinf$ci[, 1], fsinf$ci[, 2]),   # linear-scale selective CI
+      pval = fsinf$pv                              # one-sided selective p
+    )
+
+  est <- glm_estimate(x, y, vars)
+  ci <- if (!is.null(est)) stats::confint.default(glm(
+    .y ~ ., data = data.frame(.y = y, x[, vars, drop = FALSE], check.names = FALSE),
+    family = binomial()
+  )) else NULL
+  logistic <-
+    if (is.null(est)) {
+      tibble::tibble(term = vars)
+    } else {
+      tibble::tibble(
+        term = est$terms,
+        OR = exp(est$coef),
+        SE = est$se,
+        ci = ci_str(exp(ci[est$terms, 1]), exp(ci[est$terms, 2])),
+        pval = est$pval
+      )
+    }
+
+  list(fsinf = fsinf, native = native, logistic = logistic)
+}
+
+
+# ---- Method 6: univariable logistic -----------------------------------------
+
+#' Univariable logistic regression across many predictors
+#'
+#' @description
+#' Fit one logistic model per predictor (optionally adjusted for a fixed set),
+#' with robust (sandwich) CIs, and stack the results.
+#'
+#' @param df Data frame.
+#' @param outcome Outcome column name.
+#' @param cols Predictor column names to test one at a time.
+#' @param adjust Character vector of always-included adjustors (or `NULL`).
+#' @param ci_high_cap Drop rows whose upper CI exceeds this (unstable fits).
+#' @return Tibble in the `Predictors / Odds Ratios (OR) / SE / ...` schema.
+#' @importFrom purrr map_dfr
+#' @importFrom dplyr filter arrange
+#' @export
+fit_univariable <- function(
+    df,
+    outcome,
+    cols,
+    adjust = NULL,
+    ci_high_cap = 50
+) {
+  rhs_base <- if (is.null(adjust)) "" else paste(paste(adjust, collapse = " + "), "+")
+  out <-
+    purrr::map_dfr(cols, function(v) {
+      if (v %in% adjust) return(tibble::tibble())
+      model <- as.formula(paste(outcome, "~", rhs_base, v))
+      fit <- suppressWarnings(glm(model, data = df, family = binomial()))
+      robust <- sandwich::vcovHC(fit, type = "HC0")
+      lmtest::coeftest(fit, vcov. = robust) %>%
+        broom::tidy(conf.int = TRUE) %>%
+        dplyr::mutate(dplyr::across(c(estimate, conf.low, conf.high), exp)) %>%
+        dplyr::transmute(
+          Predictors = term,
+          `Odds Ratios (OR)` = round(estimate, 2),
+          SE = round(std.error, 2),
+          `Z-scores` = statistic,
+          `P-values` = round(p.value, 3),
+          `CI (low)` = round(conf.low, 2),
+          `CI (high)` = round(conf.high, 2)
+        )
+    })
+  out %>%
+    dplyr::filter(Predictors != "(Intercept)") %>%
+    dplyr::filter(is.null(adjust) | !grepl(paste(adjust, collapse = "|"), Predictors)) %>%
+    dplyr::filter(`CI (high)` < ci_high_cap) %>%
+    dplyr::arrange(`P-values`)
+}
+
+
+# ---- Method 7: p-value-screened multivariable logistic ----------------------
+
+#' Multivariable logistic from p-value-screened predictors, with robust CIs
+#'
+#' @description
+#' Screen predictors from a univariable table at `pval_threshold`, drop
+#' `unwanted`, fit one logistic model, and return sandwich-robust ORs. NOTE: the
+#' p-values are post-selection (screened on the same data), so treat them as
+#' exploratory.
+#'
+#' @param df Data frame.
+#' @param outcome Outcome column name.
+#' @param univ_tables List of univariable tibbles to screen from.
+#' @param unwanted Character vector of predictors to exclude.
+#' @param pval_threshold Screening threshold.
+#' @param drop_na_cols Columns that must be complete before fitting.
+#' @return List with `fit` (glm) and `table` (OR schema tibble).
+#' @importFrom dplyr bind_rows filter pull transmute
+#' @importFrom stringr str_replace
+#' @export
+fit_multivariable <- function(
+    df,
+    outcome,
+    univ_tables,
+    unwanted = character(),
+    pval_threshold = 0.2,
+    drop_na_cols = NULL
+) {
+  predictors <-
+    dplyr::bind_rows(univ_tables) %>%
+    dplyr::filter(`P-values` < pval_threshold) %>%
+    dplyr::pull(`Predictors`) %>%
+    stringr::str_replace("^([a-z0-9_]*)([A-Z].*)$", "\\1") %>%
+    unique()
+  predictors <- predictors[!predictors %in% unwanted]
+
+  if (!is.null(drop_na_cols)) df <- tidyr::drop_na(df, dplyr::all_of(drop_na_cols))
+  model <- as.formula(paste(outcome, "~", paste(predictors, collapse = " + ")))
+  fit <- glm(model, data = df, family = binomial())
+
+  robust <- sandwich::vcovHC(fit, type = "HC0")
+  table <-
+    lmtest::coeftest(fit, vcov. = robust) %>%
+    broom::tidy(conf.int = TRUE) %>%
+    dplyr::mutate(dplyr::across(c(estimate, conf.low, conf.high), exp)) %>%
+    dplyr::filter(term != "(Intercept)") %>%
+    dplyr::transmute(
+      Predictors = term,
+      `Odds Ratios (OR)` = round(estimate, 2),
+      SE = round(std.error, 2),
+      `Z-scores` = statistic,
+      `P-values` = round(p.value, 3),
+      `CI (low)` = round(conf.low, 2),
+      `CI (high)` = round(conf.high, 2)
+    )
+  list(fit = fit, table = table, predictors = predictors)
+}
+
+
+# ---- Bootstrap summary + comparison blocks ----------------------------------
+
+#' Summarise a raw bootstrap object (cheap; re-run freely)
+#'
+#' @param raw Output of [bootstrap_lasso_raw()].
+#' @param alpha Percentile-CI level.
+#' @return Tibble with conditional/unconditional OR, CIs, p-values, and the
+#'   distribution of the native one-sided selective p.
+#' @importFrom purrr map_dfr
+#' @importFrom dplyr filter arrange desc
+#' @export
+summarize_bootstrap <- function(raw, alpha = 0.05) {
+  B <- raw$B_valid
+  qlo <- alpha / 2
+  qhi <- 1 - alpha / 2
+  perc_p <- function(v) pmin(1, 2 * min(mean(v <= 0), mean(v >= 0)))
+  purrr::map_dfr(raw$terms, function(v) {
+    d <- dplyr::filter(raw$draws, term == v)
+    lo <- d$log_or
+    nch <- length(lo)
+    loall <- c(lo, rep(0, B - nch))
+    cc <- exp(quantile(lo, c(qlo, qhi), names = FALSE))
+    uu <- exp(quantile(loall, c(qlo, qhi), names = FALSE))
+    sp <- quantile(d$si_p, c(qlo, qhi), names = FALSE, na.rm = TRUE)
+    tibble::tibble(
+      term = v,
+      n_chosen = nch,
+      pct_chosen = 100 * nch / B,
+      OR_cond = exp(median(lo)),
+      OR_uncond = exp(median(loall)),
+      SE = sd(lo),
+      ci_cond = ci_str(cc[1], cc[2]),
+      ci_uncond = ci_str(uu[1], uu[2]),
+      si_pval_median = median(d$si_p, na.rm = TRUE),
+      si_pval_int = ci_str(sp[1], sp[2]),
+      cond_pval = perc_p(lo),
+      uncond_pval = perc_p(loall)
+    )
+  }) %>%
+    dplyr::arrange(dplyr::desc(pct_chosen))
+}
+
+
+# ---- Combined-table adapters (one row per term, prefixed columns) -----------
+
+#' Selective-inference block at 95% + 90%, one-sided p (internal to the export)
+#' @keywords internal
+si_block <- function(x, y, k) {
+  f95 <- suppressMessages(fit_selective_lasso(x, y, alpha = 0.05, k = k, nfolds = 10))
+  f90 <- suppressMessages(fit_selective_lasso(x, y, alpha = 0.10, k = k, nfolds = 10))
+  f95$table %>%
+    dplyr::transmute(
+      term,
+      OR = odds_ratio,
+      SE = NA_real_,
+      ci95 = ci_str(ci_lo, ci_hi),
+      pval = pvalue,
+      pval_1sided = pvalue_1sided
+    ) %>%
+    dplyr::left_join(
+      f90$table %>% dplyr::transmute(term, ci90 = ci_str(ci_lo, ci_hi)),
+      by = "term"
+    )
+}
+
+#' Bootstrap block for the combined table (internal)
+#' @keywords internal
+boot_block <- function(raw, alpha = 0.05) {
+  B <- raw$B_valid
+  qlo <- alpha / 2
+  qhi <- 1 - alpha / 2
+  perc_p <- function(v) pmin(1, 2 * min(mean(v <= 0), mean(v >= 0)))
+  purrr::map_dfr(raw$terms, function(v) {
+    d <- dplyr::filter(raw$draws, term == v)
+    lo <- d$log_or
+    nch <- length(lo)
+    loall <- c(lo, rep(0, B - nch))
+    cc <- exp(quantile(lo, c(qlo, qhi), names = FALSE))
+    uu <- exp(quantile(loall, c(qlo, qhi), names = FALSE))
+    sp <- quantile(d$si_p, c(qlo, qhi), names = FALSE, na.rm = TRUE)
+    tibble::tibble(
+      term = v,
+      n_chosen = nch,
+      pct_chosen = 100 * nch / B,
+      OR_cond = exp(median(lo)),
+      OR_uncond = exp(median(loall)),
+      SE = sd(lo),
+      ci_cond = ci_str(cc[1], cc[2]),
+      ci_uncond = ci_str(uu[1], uu[2]),
+      si_pval_median = median(d$si_p, na.rm = TRUE),
+      si_pval_int = ci_str(sp[1], sp[2]),
+      cond_pval = perc_p(lo),
+      uncond_pval = perc_p(loall)
+    )
+  })
+}
+
+#' Split block for the combined table (combined CI into one string) (internal)
+#' @keywords internal
+split_block <- function(x, y, n_splits = 1000) {
+  fit_split_lasso(x, y, n_splits = n_splits, nfolds = 10) %>%
+    dplyr::transmute(
+      term,
+      OR = OR,
+      SE = SE,
+      ci = ci_str(ci_lo, ci_hi),
+      pval = pval,
+      n_tested = n_tested,
+      pct_tested = pct_tested
+    )
+}
+
+
+# ---- The one orchestrator ---------------------------------------------------
+
+#' Run every method across all conditions and write the CSVs
+#'
+#' @description
+#' Applies selective inference (optimal + min lambda), the bootstrap, the split
+#' method, and Firth to each condition; attaches univariable, multivariable,
+#' stepwise (logistic) and native fs to the `all` rows; and writes each method's
+#' own CSV plus one combined file. Key parameters are surfaced explicitly even
+#' where defaults exist, so the run is self-documenting.
+#'
+#' @param conditions Named list; each element has `x`, `y` (and any metadata).
+#' @param raw_all Named list of [bootstrap_lasso_raw()] outputs, one per condition.
+#' @param uni_table Univariable tibble for the `all` rows.
+#' @param multi_by_condition Named list mapping condition -> multivariable tibble
+#'   (or `NULL`).
+#' @param step_fit Output of [fit_stepwise()] (uses its `native`/`logistic`).
+#' @param csv_folder Directory to write CSVs into.
+#' @param nfolds,n_splits,boot_alpha Surfaced key parameters.
+#' @return The combined tibble (invisibly written to disk as well).
+#' @importFrom purrr imap imap_dfr reduce
+#' @importFrom dplyr bind_rows full_join mutate arrange desc select starts_with
+#'   transmute if_any
+#' @importFrom readr write_csv
+#' @export
+run_all_methods <- function(
+    conditions,
+    raw_all,
+    uni_table,
+    multi_by_condition,
+    step_fit,
+    csv_folder,
+    nfolds = 10,
+    n_splits = 1000,
+    boot_alpha = 0.05
+) {
+
+  # ---- Per-condition, stacked (boot first so its si_pval leads) -------------
+  per_cond <-
+    purrr::imap(conditions, function(cond, name) {
+      lopt <- si_block(cond$x, cond$y, k = NULL)
+      vars_opt <- lopt$term
+
+      blocks <- list(
+        boot_block(raw_all[[name]], alpha = boot_alpha) %>% prefix_cols("boot_lasso"),
+        lopt %>% prefix_cols("lasso_opt"),
+        si_block(cond$x, cond$y, k = 0) %>% prefix_cols("lasso_min"),
+        split_block(cond$x, cond$y, n_splits = n_splits) %>% prefix_cols("split"),
+        fit_firth(cond$x, cond$y, vars_opt) %>% prefix_cols("firth")
+      )
+      m <- multi_by_condition[[name]]
+      if (!is.null(m)) {
+        blocks <- c(blocks, list(norm_orlike(m) %>% prefix_cols("multi")))
+      }
+      purrr::reduce(blocks, dplyr::full_join, by = "term") %>%
+        dplyr::mutate(condition = name, .before = 1)
+    })
+
+  combined <- dplyr::bind_rows(per_cond)
+
+  # ---- uni + step (logistic) + fs (native) on the "all" rows only -----------
+  extra_all <-
+    purrr::reduce(
+      list(
+        norm_orlike(uni_table) %>% prefix_cols("uni"),
+        step_fit$logistic %>% prefix_cols("step"),
+        step_fit$native %>% prefix_cols("fs")
+      ),
+      dplyr::full_join,
+      by = "term"
+    ) %>%
+    dplyr::mutate(condition = "all")
+
+  combined <-
+    combined %>%
+    dplyr::full_join(extra_all, by = c("condition", "term")) %>%
+    dplyr::arrange(condition, dplyr::desc(boot_lasso_pct_chosen))
+
+  # ---- Write each method + the combined file --------------------------------
+  readr::write_csv(
+    round_readable(combined),
+    file.path(csv_folder, "results_combined_all_methods.csv")
+  )
+  readr::write_csv(
+    round_readable(purrr::imap_dfr(conditions, function(cond, name) {
+      si_block(cond$x, cond$y, NULL) %>% dplyr::mutate(condition = name, .before = 1)
+    })),
+    file.path(csv_folder, "results_lasso_optimal.csv")
+  )
+  readr::write_csv(
+    round_readable(purrr::imap_dfr(conditions, function(cond, name) {
+      si_block(cond$x, cond$y, 0) %>% dplyr::mutate(condition = name, .before = 1)
+    })),
+    file.path(csv_folder, "results_lasso_min.csv")
+  )
+  readr::write_csv(
+    round_readable(purrr::imap_dfr(raw_all, function(raw, name) {
+      boot_block(raw, alpha = boot_alpha) %>%
+        dplyr::mutate(condition = name, .before = 1)
+    })),
+    file.path(csv_folder, "results_bootstrap.csv")
+  )
+  readr::write_csv(
+    round_readable(purrr::imap_dfr(conditions, function(cond, name) {
+      split_block(cond$x, cond$y, n_splits = n_splits) %>%
+        dplyr::mutate(condition = name, .before = 1)
+    })),
+    file.path(csv_folder, "results_split.csv")
+  )
+  readr::write_csv(
+    round_readable(
+      combined %>%
+        dplyr::select(condition, term, dplyr::starts_with("firth_")) %>%
+        dplyr::filter(dplyr::if_any(dplyr::starts_with("firth_"), ~ !is.na(.)))
+    ),
+    file.path(csv_folder, "results_firth.csv")
+  )
+  readr::write_csv(
+    round_readable(step_fit$logistic),
+    file.path(csv_folder, "results_stepwise_logistic.csv")
+  )
+  readr::write_csv(
+    round_readable(step_fit$native),
+    file.path(csv_folder, "results_fs_native_linear.csv")
+  )
+
+  invisible(combined)
+}
+```
+
+
 
 # Write
 
@@ -4976,10 +8820,53 @@ print(pdf_folder)
 print(html_folder)
 ```
 
+## Models
+
+```{r}
+# Dedicated folder for reloadable model objects (idempotent)
+models_folder <- file.path(date_folder, "models")
+suppressWarnings(dir.create(models_folder))
+
+# Full fit objects for provenance and posterity
+saveRDS(
+  list(
+    results = results,          # per-condition fit objects (incl. raw $fit)
+    summary = summary_tbl,      # the flattened table
+    conditions = conditions,    # which x / y went into each (provenance)
+    provenance = list(
+      date = Sys.time(),
+      outcome = CHOSEN_OUTCOME,
+      config = params$CONFIG,
+      proportion = params$PROPORTION_OF_DATA,
+      seed = 141845,
+      r_version = R.version.string,
+      glmnet = as.character(packageVersion("glmnet")),
+      selectiveInference = as.character(packageVersion("selectiveInference"))
+    )
+  ),
+  file = file.path(models_folder, "selective_lasso_results.rds")
+)
+```
+
 
 ## Figures
 
-Write all figures.
+Write all figures from the selective inference modeling.
+
+```{r}
+# Forest plots to PDF (loops over every condition)
+for (name in names(conditions)) {
+  res <- results[[name]]
+  if (is.null(res) || nrow(res$table) == 0) next
+  ggsave(
+    filename = file.path(pdf_folder, paste0(conditions[[name]]$plot_name, ".pdf")),
+    plot = plots[[conditions[[name]]$plot_name]],
+    width = 8,
+    height = 6
+  )
+}
+```
+
 
 ```{r}
 # Save
@@ -5063,7 +8950,16 @@ if (with(plots, exists("odds_ratios_without_components_no_surgery"))) {
 
 ## Tables
 
-Write all tables.
+Selective inference modeling.
+
+```{r}
+# Human-readable combined table (one row per selected term, all conditions)
+write_csv(
+  summary_tbl,
+  file.path(csv_folder, "selective_lasso_summary.csv")
+)
+```
+
 
 ```{r}
 # # Arguments
@@ -5101,11 +8997,45 @@ write_csv(
 
 ```{r}
 write_csv(
-  multivariable_pvalue,
-  file.path(csv_folder, "multivariable_pvalue.csv")
+  univariable_adjusted_recoded,
+  file.path(csv_folder, "univariable_adjusted_recoded.csv")
 )
 ```
 
+```{r}
+write_csv(
+  univariable_adjusted_recoded_interactions,
+  file.path(csv_folder, "univariable_adjusted_recoded_interactions.csv")
+)
+```
+
+```{r}
+write_csv(
+  multivariable_pvalue_without_scores,
+  file.path(csv_folder, "multivariable_pvalue_without_scores.csv")
+)
+```
+
+```{r}
+write_csv(
+  multivariable_pvalue_without_components,
+  file.path(csv_folder, "multivariable_pvalue_without_components.csv")
+)
+```
+
+```{r}
+write_csv(
+  multivariable_pvalue_sm_grade,
+  file.path(csv_folder, "multivariable_pvalue_sm_grade.csv")
+)
+```
+
+```{r}
+write_csv(
+  multivariable_pvalue_had_surgery,
+  file.path(csv_folder, "multivariable_pvalue_had_surgery.csv")
+)
+```
 
 ## Data
 
